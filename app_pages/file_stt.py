@@ -1,6 +1,10 @@
-"""파일 전사 — 업로드 또는 브라우저 녹음을 통째로 전사.
+"""파일 전사 — 업로드 또는 브라우저 녹음(st.audio_input)을 통째로 전사.
 
-    오디오 업로드/녹음 → bytes → 임시 WAV → faster-whisper → 구간별 결과 → TXT
+    Browser → st.audio_input → bytes → RunPod: 임시 WAV → faster-whisper
+      → 구간별 결과 → TXT / JSON
+
+스트리밍이 아니라 녹음이 끝난 뒤 한 번에 돌린다. 실시간 결과와 비교할
+정답(reference) 을 만드는 용도.
 """
 import json
 import os
@@ -9,12 +13,13 @@ import time
 
 import streamlit as st
 
-from stt.config import WHISPER_SIZES, StreamConfig
+from stt.config import WHISPER_SIZES, StreamConfig, default_compute_type, default_device
 from stt.metrics.evaluator import evaluate
 from stt.transcript.medical_terms import correct
 
 st.title("파일 전사")
-st.caption("전체 오디오를 한 번에 전사합니다. 실시간 결과와 비교할 정답(reference) 만들기에도 씁니다.")
+st.caption("브라우저에서 녹음하거나 파일을 올리면 RunPod 에서 한 번에 전사합니다. "
+           "실시간 결과와 비교할 정답(reference) 만들기에도 씁니다.")
 
 
 @st.cache_resource(show_spinner="모델 로드 중…")
@@ -32,8 +37,13 @@ with st.sidebar:
     lang = st.text_input("언어 코드", "ko", help="비우면 자동 감지")
     beam_size = st.slider("beam size", 1, 10, 5,
                           help="후보를 여러 개 유지하는 beam search 폭. 클수록 정확·느림")
-    device = st.selectbox("device", ["cpu", "cuda"])
-    compute_type = st.selectbox("compute type", ["int8", "int8_float16", "float16", "float32"])
+    devices = ["cpu", "cuda"]
+    device = st.selectbox("device", devices, index=devices.index(default_device()))
+    compute_types = ["int8", "int8_float16", "float16", "float32"]
+    compute_type = st.selectbox(
+        "compute type", compute_types,
+        index=compute_types.index(default_compute_type(device)),
+    )
     correction = st.toggle("의료 용어 교정", True)
 
 source = st.segmented_control("입력", ["업로드", "녹음"], default="업로드")
@@ -44,7 +54,7 @@ if source == "업로드":
     if uploaded:
         audio_bytes = uploaded.getvalue()
 else:
-    recorded = st.audio_input("녹음하세요")
+    recorded = st.audio_input("녹음하세요")   # 브라우저 마이크 → WAV bytes
     if recorded:
         audio_bytes = recorded.getvalue()
 

@@ -46,8 +46,8 @@ df = load_sessions()
 
 if df.empty:
     st.info(
-        "아직 저장된 세션이 없습니다. **실시간 전사** 페이지에서 녹음하거나 "
-        "STT 서버로 세션을 만들면 `transcripts/` 에 쌓입니다.",
+        "아직 저장된 세션이 없습니다. **실시간 전사** 페이지에서 녹음하면 "
+        "백엔드의 `transcripts/` 에 쌓입니다.",
         icon=":material/inbox:",
     )
     st.stop()

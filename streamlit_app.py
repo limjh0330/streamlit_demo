@@ -1,22 +1,18 @@
-"""ER 실시간 음성 전사 데모 — Streamlit 진입점.
+"""ER 실시간 음성 전사 데모 — Streamlit 진입점 (RunPod 에서 실행).
 
-    streamlit run streamlit_app.py
+    streamlit run streamlit_app.py --server.port 8501 --server.address 0.0.0.0
+
+실시간 전사는 같은 인스턴스에서 도는 STT 백엔드가 필요하다.
+
+    python -m server.main --host 0.0.0.0 --port 8000
 """
 import streamlit as st
-
-from stt.config import StreamConfig
 
 st.set_page_config(
     page_title="ER 실시간 음성 전사",
     page_icon=":material/graphic_eq:",
     layout="wide",
 )
-
-# 페이지 간 공유하는 상태는 여기서 한 번만 초기화한다.
-st.session_state.setdefault("config", StreamConfig())
-st.session_state.setdefault("session", None)
-st.session_state.setdefault("mic", None)
-st.session_state.setdefault("last_result", None)
 
 page = st.navigation(
     [
@@ -27,7 +23,6 @@ page = st.navigation(
             default=True,
         ),
         st.Page("app_pages/file_stt.py", title="파일 전사", icon=":material/audio_file:"),
-        st.Page("app_pages/browser.py", title="태블릿 · 브라우저", icon=":material/tablet:"),
         st.Page("app_pages/metrics.py", title="성능 비교", icon=":material/speed:"),
     ],
     position="top",

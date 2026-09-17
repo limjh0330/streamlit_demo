@@ -2,12 +2,13 @@
 
 개발문서 기준값:
   - PCM16 / 16 kHz / mono
-  - 50~100 ms audio block
+  - 100~500 ms audio chunk (브라우저 AudioWorklet)
   - 5~6 s sliding window + 1~2 s overlap
 """
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+import os
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 # ---------------------------------------------------------------- 오디오 규격
@@ -16,6 +17,17 @@ CHANNELS = 1
 DTYPE = "float32"
 BLOCK_DURATION = 0.1                      # 100 ms
 BLOCK_SIZE = int(SAMPLE_RATE * BLOCK_DURATION)
+CHUNK_MS_CHOICES = (100, 200, 250, 500)   # 브라우저가 보내는 청크 길이
+
+# ---------------------------------------------------------------- 백엔드 주소
+# Streamlit 과 STT 백엔드는 같은 RunPod 인스턴스에서 서로 다른 포트로 돈다.
+#   - Python → 백엔드(상태 조회): 같은 호스트이므로 localhost
+#   - 브라우저 → 백엔드(오디오):  외부에서 접근 가능한 주소가 필요
+# RunPod 은 포트마다 별도 호스트(<podId>-<port>.proxy.runpod.net)를 주므로
+# WS_URL 이 비어 있으면 브라우저가 주소창에서 유도한다.
+BACKEND_PORT = int(os.getenv("STT_BACKEND_PORT", "8000"))
+API_URL = os.getenv("STT_API_URL", f"http://127.0.0.1:{BACKEND_PORT}")
+WS_URL = os.getenv("STT_WS_URL", "")
 
 # ---------------------------------------------------------------- 경로
 ROOT = Path(__file__).resolve().parent.parent
@@ -27,6 +39,27 @@ for _d in (RECORDINGS_DIR, TRANSCRIPTS_DIR, MODELS_DIR):
     _d.mkdir(exist_ok=True)
 
 
+# ---------------------------------------------------------------- 실행 장치
+def default_device() -> str:
+    """RunPod GPU 인스턴스면 cuda, 로컬 Mac 이면 cpu.
+
+    faster-whisper 는 CTranslate2 위에 있으므로 torch 대신 CTranslate2 에 묻는다.
+    """
+    try:
+        import ctranslate2
+
+        if ctranslate2.get_cuda_device_count() > 0:
+            return "cuda"
+    except Exception:
+        pass
+    return "cpu"
+
+
+def default_compute_type(device: str | None = None) -> str:
+    """GPU 는 float16, CPU 는 int8 이 기본."""
+    return "float16" if (device or default_device()) == "cuda" else "int8"
+
+
 @dataclass
 class StreamConfig:
     """세션 하나의 스트리밍 파라미터."""
@@ -35,8 +68,8 @@ class StreamConfig:
     engine: str = "whisper"               # whisper | zipformer | sensevoice
     model_size: str = "small"             # whisper 전용
     model_dir: str | None = None          # zipformer / sensevoice 모델 디렉터리
-    device: str = "cpu"                   # cpu | cuda | auto
-    compute_type: str = "int8"            # ctranslate2 quantization
+    device: str = field(default_factory=default_device)          # cpu | cuda
+    compute_type: str = field(default_factory=default_compute_type)  # ct2 quantization
     language: str | None = "ko"
     beam_size: int = 1                    # partial 윈도우: 지연을 위해 1
     final_beam_size: int = 5              # 발화 확정 시 1회만: 품질을 위해 5

@@ -2,12 +2,36 @@
 # ER 실시간 음성 전사 (STT)
 
 응급실 진료 대화를 실시간으로 전사하는 시스템입니다.
-같은 코어(`stt/`) 위에 **두 개의 입력 경로**가 올라가 있습니다.
+**수음은 브라우저, 추론은 RunPod** 에서 합니다. 클라이언트에는 아무것도 설치하지 않습니다.
 
-| 경로 | 마이크 위치 | 진입점 |
+```
+┌──────────── Mac / Client ─────────────┐
+│                                       │
+│ Microphone                            │
+│      ↓ getUserMedia()                 │
+│ Browser                               │
+│      ↓ AudioWorklet (PCM16 / 16 kHz)  │
+│ Streamlit audio_input / WebSocket     │
+└────────────────┬──────────────────────┘
+                 │  100~500 ms audio chunk
+                 ↓
+┌──────────── RunPod ───────────────────┐
+│                                       │
+│ Streamlit (8501) / Backend (8000)     │
+│       ↓                               │
+│ STT model (streaming ASR)             │
+│       ↓                               │
+│ Korean transcript (partial → final)   │
+└────────────────┬──────────────────────┘
+                 │  JSON partial / final
+                 ↓
+              Browser
+```
+
+| 경로 | 브라우저가 하는 일 | RunPod 이 하는 일 |
 |---|---|---|
-| Streamlit 데모 | 앱이 실행 중인 **컴퓨터** (sounddevice) | `streamlit run streamlit_app.py` |
-| STT 서버 | **태블릿/브라우저** (getUserMedia + AudioWorklet) | `python -m server.main` |
+| **실시간 전사** | getUserMedia → AudioWorklet → WebSocket 으로 청크 전송 | streaming ASR → partial/final 을 WS 로 회신 |
+| **파일 전사** | `st.audio_input` / 파일 업로드 | 전체 오디오를 한 번에 전사 |
 
 ASR 백엔드는 어댑터로 분리되어 있어 같은 오디오로 세 엔진을 비교할 수 있습니다.
 
@@ -37,34 +61,47 @@ pip install sherpa-onnx
 
 ## 2. 실행
 
-### Streamlit 데모 (로컬 마이크)
+RunPod 인스턴스에서 **두 프로세스**를 띄웁니다. 포트 8501(Streamlit)과
+8000(STT 백엔드)을 모두 노출해 두세요.
 
 ```bash
-streamlit run streamlit_app.py
+# 1) STT 백엔드 — 브라우저 오디오를 받는 WebSocket 서버
+python -m server.main --host 0.0.0.0 --port 8000
+
+# 2) Streamlit UI
+streamlit run streamlit_app.py --server.port 8501 --server.address 0.0.0.0
 ```
+
+Mac 에서는 RunPod 이 준 Streamlit 주소만 열면 됩니다.
 
 | 페이지 | 하는 일 |
 |---|---|
-| 실시간 전사 | 로컬 마이크 → sliding window → partial/final 전사, 라이브 지표 |
-| 파일 전사 | 업로드·녹음 파일을 통째로 전사. 정답(reference) 만들기용 |
-| 태블릿 · 브라우저 | STT 서버 실행법, 접속 URL, HTTPS 인증서 생성 안내 |
+| 실시간 전사 | 브라우저 마이크 → WebSocket → streaming ASR → partial/final, 라이브 지표 |
+| 파일 전사 | `st.audio_input`·업로드 파일을 통째로 전사. 정답(reference) 만들기용 |
 | 성능 비교 | 저장된 세션의 RTF/지연/WER/CER/의료용어 recall 비교 |
 
-### STT 서버 (태블릿 마이크)
+### 백엔드 주소
+
+브라우저는 Streamlit(8501)과 **다른 호스트**의 백엔드(8000)로 오디오를 보냅니다.
+RunPod 은 포트마다 호스트를 따로 주므로(`<podId>-<port>.proxy.runpod.net`)
+기본값은 주소창에서 자동으로 유도합니다. 다르게 노출했다면 환경변수나
+사이드바에서 직접 지정하세요.
+
+| 환경변수 | 기본값 | 쓰는 쪽 |
+|---|---|---|
+| `STT_BACKEND_PORT` | `8000` | 주소 유도에 쓰는 백엔드 포트 |
+| `STT_API_URL` | `http://127.0.0.1:8000` | Python → 백엔드 (상태 조회, 같은 인스턴스) |
+| `STT_WS_URL` | (비움 → 자동 유도) | 브라우저 → 백엔드 (오디오 스트림) |
+
+브라우저는 **HTTPS 또는 localhost** 에서만 마이크를 엽니다. RunPod 프록시는
+HTTPS 라 그대로 되고, 로컬 개발은 `localhost` 라 그대로 됩니다.
+
+### 로컬에서 돌려보기
 
 ```bash
-python -m server.main --host 0.0.0.0 --port 8000
-```
-
-브라우저는 **HTTPS 또는 localhost** 에서만 마이크를 허용합니다.
-태블릿에서 IP 로 접속하려면 인증서가 필요합니다.
-
-```bash
-openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
-  -keyout key.pem -out cert.pem -subj "/CN=192.168.0.10" \
-  -addext "subjectAltName=IP:192.168.0.10"
-
-python -m server.main --host 0.0.0.0 --port 8000 --certfile cert.pem --keyfile key.pem
+python -m server.main --host 127.0.0.1 --port 8000
+streamlit run streamlit_app.py --server.port 8501
+# http://localhost:8501
 ```
 
 ### 테스트
@@ -82,20 +119,24 @@ pytest tests/
 streamlit_demo/
 ├── streamlit_app.py          # Streamlit 진입점 (st.navigation)
 ├── app_pages/
-│   ├── realtime.py           # 로컬 마이크 실시간 전사
-│   ├── file_stt.py           # 파일/녹음 전사 (기존 app.py 계승)
-│   ├── browser.py            # 태블릿 경로 안내
+│   ├── realtime.py           # 브라우저 마이크 실시간 전사
+│   ├── file_stt.py           # audio_input / 업로드 파일 전사
 │   └── metrics.py            # 엔진 성능 비교
 │
-├── stt/                      # ── 공용 코어 (서버·Streamlit 공유) ──
-│   ├── config.py             # 오디오 규격 + StreamConfig
+├── web/                      # ── 브라우저에서 도는 코드 ──
+│   ├── live_mic.py           # CCv2 컴포넌트 등록 + Python 래퍼
+│   ├── live_mic.html         # 컴포넌트 마크업
+│   ├── live_mic.css          # Streamlit 테마 토큰(--st-*) 기반 스타일
+│   └── live_mic.js           # getUserMedia → AudioWorklet → WebSocket
+│
+├── stt/                      # ── 공용 코어 (백엔드·Streamlit 공유) ──
+│   ├── config.py             # 오디오 규격 + 백엔드 주소 + StreamConfig
 │   ├── session.py            # Session Manager (파이프라인 전체)
 │   ├── audio/
 │   │   ├── buffer.py         # sliding window + overlap
 │   │   ├── recorder.py       # raw WAV 실시간 저장
 │   │   ├── resampler.py      # PCM16 ↔ float32, 리샘플
-│   │   ├── vad.py            # 에너지 VAD + endpoint 검출
-│   │   └── mic.py            # sounddevice InputStream
+│   │   └── vad.py            # 에너지 VAD + endpoint 검출
 │   ├── asr/
 │   │   ├── base.py           # ASREngine 인터페이스 + 팩토리
 │   │   ├── whisper.py        # faster-whisper
@@ -109,29 +150,33 @@ streamlit_demo/
 │       └── evaluator.py      # WER / CER / 의료용어 recall
 │
 ├── server/
-│   ├── main.py               # FastAPI 앱 + REST + 정적 파일
-│   └── websocket.py          # /ws 엔드포인트
-│
-├── web/
-│   ├── index.html            # 브라우저 UI
-│   ├── recorder.js           # getUserMedia → WebSocket
-│   └── pcm-worklet.js        # AudioWorklet: PCM16 / 16 kHz 변환
+│   ├── main.py               # FastAPI 앱 + REST (상태 조회)
+│   └── websocket.py          # /ws 엔드포인트 (오디오 인입 / 전사 회신)
 │
 ├── recordings/               # 세션별 원본 WAV
 ├── transcripts/              # 세션별 전사 결과 (.txt / .json)
-├── models/                   # sherpa-onnx 모델
-├── examples/                 # sounddevice 참고 예제 (원본)
-└── app.py                    # 초기 단일 파일 데모 (streamlit_app.py 로 대체됨)
+└── models/                   # sherpa-onnx 모델
 ```
+
+### 마이크 캡처가 Streamlit 안에서 도는 이유
+
+Streamlit Custom Component **v2** 는 iframe 이 아니라 앱 문서 안에서 실행됩니다.
+따라서 마이크 권한을 iframe 으로 위임할 필요 없이 `getUserMedia()`,
+`AudioWorklet`, `WebSocket` 을 그대로 쓸 수 있습니다. AudioWorklet 은 URL 로만
+로드되므로 워클릿 소스를 Blob URL 로 만들어 넘깁니다(`web/live_mic.js`).
+
+부분 전사는 초당 여러 번 갱신되므로 Python 으로 올리지 않고 브라우저에서 직접
+그립니다. 세션이 끝날 때만 `setStateValue("result", …)` 로 요약을 한 번 올려
+리런을 1회로 억제합니다.
 
 ---
 
 ## 4. 파이프라인
 
 ```
-마이크 / 브라우저
-   ↓ PCM16 16 kHz mono, 100 ms block
-StreamingSession.feed()          ← 논블로킹 (PortAudio 콜백 / WS 핸들러)
+브라우저 마이크 (getUserMedia → AudioWorklet)
+   ↓ PCM16 16 kHz mono, 100~500 ms chunk over WebSocket
+StreamingSession.feed()          ← 논블로킹 (WS 핸들러에서 호출)
    ↓ Queue
 워커 스레드
    ├→ WavRecorder                → recordings/<session>.wav
@@ -142,7 +187,7 @@ ASREngine.transcribe(audio, t0)  → 절대 시각이 붙은 단어열
    ↓
 TranscriptMerger                 → stable(확정) + unstable(부분)
    ↓
-Event(partial / final / metrics) → Streamlit fragment · WebSocket JSON
+Event(partial / final / metrics) → WebSocket JSON → 브라우저 화면
 ```
 
 ### 중복 단어 제거 (핵심)
@@ -173,7 +218,7 @@ window/overlap/지터 조합을 훑는 회귀 테스트로 고정해 두었습�
 | WER / CER | `metrics/evaluator.py` | 한국어는 CER 이 더 신뢰할 만함 |
 | 의료용어 recall | 〃 | 정답 속 도메인 용어를 얼마나 살렸는지 |
 
-### 실측 (Apple Silicon, CPU int8, 5.4 s 한국어 발화, window 5 s / overlap 1.5 s)
+### 실측 (Apple Silicon 로컬, CPU int8, 5.4 s 한국어 발화, window 5 s / overlap 1.5 s)
 
 | 모델 | RTF | 첫 partial | final 지연 | 전사 |
 |---|---|---|---|---|
@@ -182,6 +227,8 @@ window/overlap/지터 조합을 훑는 회귀 테스트로 고정해 두었습�
 | small | 0.44 | 2.66 s | 0.72 s | 정답과 일치 |
 
 CPU 에서는 `small` 까지가 실시간(RTF < 1)입니다. `medium` 이상은 GPU 를 쓰세요.
+RunPod GPU 인스턴스에서는 `stt/config.py` 의 `default_device()` 가 CUDA 를 감지해
+`device=cuda` / `compute_type=float16` 을 자동으로 고릅니다.
 
 첫 partial 지연은 `first_hop_sec`(기본 1.5 s)로 조절합니다. 발화 시작 직후
 첫 윈도우만 짧게 끊어 내보내고, 이후에는 `window - overlap`(=3.5 s) 간격으로
@@ -221,6 +268,7 @@ CPU 에서는 `small` 까지가 실시간(RTF < 1)입니다. `medium` 이상은 
 | 단계 | 상태 |
 |---|---|
 | 1. Web Audio + WebSocket (PCM16 / 16 kHz / WAV 저장) | 구현 완료 |
+| 1-b. RunPod 배포 (브라우저 수음 + 서버 추론 분리) | 구현 완료 |
 | 2. Whisper baseline (sliding window + overlap, partial) | 구현 완료 |
 | 3. Transcript merge (stable/unstable, overlap dedup) | 구현 완료 · 회귀 테스트 |
 | 4. Metrics logging (RTF, latency, 자원 사용) | 구현 완료 |

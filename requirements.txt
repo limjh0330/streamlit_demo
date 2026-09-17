@@ -1,12 +1,11 @@
 # ---- 필수 -------------------------------------------------------------
-streamlit>=1.50            # st.navigation / st.segmented_control / horizontal container
+streamlit>=1.50            # st.navigation / st.components.v2 / horizontal container
 faster-whisper>=1.0.3      # CTranslate2 기반 Whisper (한국어 baseline)
 numpy>=1.24
-sounddevice>=0.4.6         # 로컬 마이크 InputStream
 psutil>=5.9                # CPU / 메모리 지표
 pandas>=2.0                # 성능 비교 표
 
-# ---- WebSocket STT 서버 (태블릿 브라우저 수음) --------------------------
+# ---- STT 백엔드 (브라우저 오디오를 받는 WebSocket 서버) ------------------
 fastapi>=0.110
 uvicorn[standard]>=0.29    # websockets 포함
 

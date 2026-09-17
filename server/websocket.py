@@ -1,4 +1,4 @@
-"""WebSocket 엔드포인트 — 태블릿 브라우저 <-> STT 서버.
+"""WebSocket 엔드포인트 — 브라우저 <-> RunPod STT 백엔드.
 
 프로토콜
 --------

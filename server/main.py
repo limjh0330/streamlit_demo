@@ -1,22 +1,20 @@
-"""STT 서버 진입점 (FastAPI).
+"""STT 백엔드 진입점 (FastAPI) — RunPod 에서 Streamlit 과 나란히 돈다.
 
     python -m server.main --host 0.0.0.0 --port 8000
-    # 태블릿에서 http://<서버IP>:8000 접속
 
-주의: 브라우저 getUserMedia() 는 보안 컨텍스트에서만 동작한다.
-localhost 는 예외이지만, 태블릿에서 IP 로 접속하려면 HTTPS 가 필요하다.
-  python -m server.main --certfile cert.pem --keyfile key.pem
+브라우저는 `/ws` 로 PCM16 오디오를 밀어넣고 partial/final 전사를 받는다.
+Streamlit 은 `/api/*` 로 상태만 조회한다(같은 인스턴스이므로 localhost).
+
+RunPod 프록시가 TLS 를 끝내주므로 여기서는 평문 HTTP 로 띄우면 된다.
 """
 from __future__ import annotations
 
 import argparse
 import json
 import logging
-from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, WebSocket
 from fastapi.responses import FileResponse, JSONResponse
-from fastapi.staticfiles import StaticFiles
 
 from stt.config import (
     ENGINE_CHOICES,
@@ -34,9 +32,7 @@ logging.basicConfig(
     level=logging.INFO, format="%(asctime)s %(levelname)-7s %(name)s: %(message)s"
 )
 
-WEB_DIR = Path(__file__).resolve().parent.parent / "web"
-
-app = FastAPI(title="ER STT Server", version="1.0")
+app = FastAPI(title="ER STT Backend", version="2.0")
 
 
 @app.websocket("/ws")
@@ -44,6 +40,7 @@ async def websocket_route(ws: WebSocket) -> None:
     await stt_endpoint(ws)
 
 
+@app.get("/")
 @app.get("/api/health")
 async def health() -> dict:
     return {
@@ -108,29 +105,16 @@ async def sessions() -> dict:
     return {"active": list(SESSIONS), "saved": saved[:50]}
 
 
-# 웹 클라이언트(index.html, recorder.js, pcm-worklet.js) 를 루트에 서빙
-app.mount("/", StaticFiles(directory=str(WEB_DIR), html=True), name="web")
-
-
 def main() -> None:
     import uvicorn
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8000)
-    parser.add_argument("--certfile", help="HTTPS 인증서 (태블릿 마이크 접근에 필요)")
-    parser.add_argument("--keyfile", help="HTTPS 키")
     parser.add_argument("--reload", action="store_true")
     args = parser.parse_args()
 
-    uvicorn.run(
-        "server.main:app",
-        host=args.host,
-        port=args.port,
-        reload=args.reload,
-        ssl_certfile=args.certfile,
-        ssl_keyfile=args.keyfile,
-    )
+    uvicorn.run("server.main:app", host=args.host, port=args.port, reload=args.reload)
 
 
 if __name__ == "__main__":

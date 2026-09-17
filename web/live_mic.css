@@ -1,0 +1,121 @@
+/* Streamlit 테마 토큰(--st-*)을 그대로 쓰면 라이트/다크가 자동으로 맞는다. */
+.lm-root {
+  display: grid;
+  gap: 0.75rem;
+  font-family: var(--st-font);
+  color: var(--st-text-color);
+}
+
+.lm-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.lm-controls button {
+  font: inherit;
+  font-weight: 600;
+  padding: 0.5rem 1.1rem;
+  min-height: 2.5rem;
+  border-radius: var(--st-button-radius);
+  border: 1px solid var(--st-border-color);
+  cursor: pointer;
+}
+
+#lm-start {
+  background: var(--st-primary-color);
+  border-color: var(--st-primary-color);
+  color: var(--st-background-color);
+}
+
+#lm-stop {
+  background: transparent;
+  color: var(--st-text-color);
+}
+
+.lm-controls button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+#lm-status {
+  font-size: 0.85rem;
+  color: var(--st-gray-color);
+}
+#lm-status[data-kind="live"] { color: var(--st-red-color); font-weight: 600; }
+#lm-status[data-kind="error"] { color: var(--st-red-color); }
+#lm-status[data-kind="busy"] { color: var(--st-primary-color); }
+
+.lm-meter {
+  flex: 1 1 6rem;
+  height: 6px;
+  min-width: 4rem;
+  border-radius: 3px;
+  overflow: hidden;
+  background: var(--st-secondary-background-color);
+}
+
+#lm-level-bar {
+  display: block;
+  height: 100%;
+  width: 0;
+  background: var(--st-primary-color);
+  transition: width 0.08s linear;
+}
+
+#lm-finals {
+  display: grid;
+  gap: 0.4rem;
+  max-height: 40vh;
+  overflow-y: auto;
+}
+
+.lm-utterance {
+  display: grid;
+  grid-template-columns: 8.5rem 1fr;
+  gap: 0.6rem;
+  align-items: baseline;
+}
+
+.lm-time {
+  font-family: var(--st-code-font);
+  font-size: 0.78rem;
+  color: var(--st-gray-color);
+  font-variant-numeric: tabular-nums;
+}
+
+#lm-live {
+  margin: 0;
+  min-height: 3em;
+  font-size: 1.05rem;
+  line-height: 1.7;
+}
+
+#lm-stable { font-weight: 600; }
+#lm-partial { color: var(--st-gray-color); }
+
+#lm-empty {
+  margin: 0;
+  font-size: 0.85rem;
+  color: var(--st-gray-color);
+}
+
+#lm-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 1.6rem;
+  margin: 0;
+}
+
+.lm-metric dt {
+  font-size: 0.7rem;
+  color: var(--st-gray-color);
+}
+
+.lm-metric dd {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
