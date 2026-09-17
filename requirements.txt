@@ -1,0 +1,16 @@
+# ---- 필수 -------------------------------------------------------------
+streamlit>=1.50            # st.navigation / st.segmented_control / horizontal container
+faster-whisper>=1.0.3      # CTranslate2 기반 Whisper (한국어 baseline)
+numpy>=1.24
+sounddevice>=0.4.6         # 로컬 마이크 InputStream
+psutil>=5.9                # CPU / 메모리 지표
+pandas>=2.0                # 성능 비교 표
+
+# ---- WebSocket STT 서버 (태블릿 브라우저 수음) --------------------------
+fastapi>=0.110
+uvicorn[standard]>=0.29    # websockets 포함
+
+# ---- 선택 -------------------------------------------------------------
+scipy>=1.10                # 고품질 리샘플링 (없으면 선형 보간 폴백)
+# sherpa-onnx>=1.10        # Zipformer(streaming) / SenseVoice 백엔드
+# webrtcvad>=2.0.10        # 에너지 VAD 대신 사용 (더 정확)

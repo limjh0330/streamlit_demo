@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>실시간 음성 전사 · ER STT</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f6f7f9;
+    --panel: #ffffff;
+    --border: #e2e5ea;
+    --text: #16191d;
+    --muted: #6b7280;
+    --accent: #2563eb;
+    --live: #dc2626;
+    --partial: #9ca3af;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1114; --panel: #171a1f; --border: #2a2f37;
+      --text: #e8eaed; --muted: #9aa2ad; --accent: #60a5fa;
+      --live: #f87171; --partial: #6b7280;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 16px;
+    font: 15px/1.6 -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo",
+          "Pretendard", "Noto Sans KR", sans-serif;
+    background: var(--bg); color: var(--text);
+    -webkit-text-size-adjust: 100%;
+  }
+  .wrap { max-width: 860px; margin: 0 auto; display: grid; gap: 14px; }
+  h1 { font-size: 20px; margin: 4px 0 0; }
+  .sub { color: var(--muted); font-size: 13px; margin: 0; }
+  .panel {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 12px; padding: 14px;
+  }
+  .controls { display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end; }
+  label { display: grid; gap: 4px; font-size: 12px; color: var(--muted); }
+  select, input[type="text"], input[type="number"] {
+    font: inherit; font-size: 14px; padding: 8px 10px; min-height: 40px;
+    border: 1px solid var(--border); border-radius: 8px;
+    background: var(--bg); color: var(--text);
+  }
+  input[type="number"] { width: 86px; }
+  input[type="text"] { width: 76px; }
+  .check { flex-direction: row; align-items: center; gap: 6px; min-height: 40px; }
+  button {
+    font: inherit; font-weight: 600; padding: 10px 18px; min-height: 44px;
+    border-radius: 8px; border: 1px solid transparent; cursor: pointer;
+  }
+  #start { background: var(--accent); color: #fff; }
+  #stop { background: transparent; color: var(--text); border-color: var(--border); }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  .statusbar { display: flex; align-items: center; gap: 10px; font-size: 13px; }
+  #status { color: var(--muted); }
+  #status[data-kind="live"] { color: var(--live); font-weight: 600; }
+  #status[data-kind="error"] { color: var(--live); }
+  #status[data-kind="busy"] { color: var(--accent); }
+  .meter { flex: 1; height: 6px; background: var(--border); border-radius: 3px; overflow: hidden; }
+  #level-bar { height: 100%; width: 0; background: var(--accent); transition: width .08s linear; }
+  #finals { max-height: 46vh; overflow-y: auto; display: grid; gap: 8px; }
+  .utterance { display: grid; grid-template-columns: 116px 1fr; gap: 10px; align-items: baseline; }
+  .utterance .time { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+  #live-line { font-size: 17px; line-height: 1.7; min-height: 3em; }
+  #partial { color: var(--partial); }
+  #metrics { display: flex; flex-wrap: wrap; gap: 8px 20px; margin: 0; }
+  .metric dt { font-size: 11px; color: var(--muted); }
+  .metric dd { margin: 0; font-size: 15px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  #download { font-size: 14px; color: var(--accent); }
+  #empty { color: var(--muted); font-size: 14px; }
+  .hint { font-size: 12px; color: var(--muted); margin: 0; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>실시간 음성 전사</h1>
+    <p class="sub">태블릿 마이크 → PCM16 16 kHz → WebSocket → sliding window ASR</p>
+  </header>
+
+  <section class="panel">
+    <div class="controls">
+      <label>엔진
+        <select id="engine">
+          <option value="whisper" selected>Whisper</option>
+          <option value="zipformer">Zipformer</option>
+          <option value="sensevoice">SenseVoice</option>
+        </select>
+      </label>
+      <label>모델
+        <select id="model-size">
+          <option value="tiny">tiny</option>
+          <option value="base">base</option>
+          <option value="small" selected>small</option>
+          <option value="medium">medium</option>
+        </select>
+      </label>
+      <label>언어<input id="language" type="text" value="ko" /></label>
+      <label>window(s)<input id="window" type="number" value="5" min="2" max="12" step="0.5" /></label>
+      <label>overlap(s)<input id="overlap" type="number" value="1.5" min="0" max="4" step="0.5" /></label>
+      <label>무음(s)<input id="silence" type="number" value="0.7" min="0.2" max="3" step="0.1" /></label>
+      <label class="check"><input id="correction" type="checkbox" checked /> 의료용어 교정</label>
+      <button id="start" type="button">녹음 시작</button>
+      <button id="stop" type="button" disabled>정지</button>
+    </div>
+    <p class="hint">HTTPS 또는 localhost 에서만 마이크에 접근할 수 있습니다.</p>
+  </section>
+
+  <section class="panel statusbar">
+    <span id="status" data-kind="idle">대기 중</span>
+    <span class="meter"><span id="level-bar"></span></span>
+    <a id="download" hidden>TXT 다운로드</a>
+  </section>
+
+  <section class="panel">
+    <div id="finals"></div>
+    <p id="live-line"><span id="stable"></span> <span id="partial"></span></p>
+    <p id="empty">녹음을 시작하면 확정된 발화와 진행 중인 부분 전사가 여기에 표시됩니다.</p>
+  </section>
+
+  <section class="panel">
+    <dl id="metrics"></dl>
+  </section>
+</div>
+<script src="recorder.js"></script>
+</body>
+</html>

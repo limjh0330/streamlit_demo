@@ -1,0 +1,8 @@
+#!/bin/sh
+'''exec' "/Users/lim/Desktop/main_lap/study/Master/ER project/streamlit_demo/.venv/bin/python" "$0" "$@"
+' '''
+import sys
+from huggingface_hub.inference._mcp.cli import app
+if __name__ == '__main__':
+    sys.argv[0] = sys.argv[0].removesuffix('.exe')
+    sys.exit(app())
