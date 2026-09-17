@@ -79,6 +79,7 @@ class StreamConfig:
     overlap_sec: float = 1.5              # 개발문서: 1~2 s
     min_window_sec: float = 1.0           # 이보다 짧으면 추론하지 않음
     first_hop_sec: float = 1.5            # 발화 시작 직후 첫 윈도우 (first partial latency)
+    refresh_sec: float = 0.8              # 발화 전체 재인식 엔진(SenseVoice)의 갱신 간격
 
     # VAD / endpoint
     vad_enabled: bool = True

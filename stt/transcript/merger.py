@@ -133,20 +133,58 @@ class TranscriptMerger:
                 return i
         return self._cut_by_time(fresh[0].start)
 
-    def update_text(self, text: str) -> tuple[str, str]:
-        """단어 타임스탬프가 없는 엔진용: 텍스트 겹침만 제거하고 전부 partial 로."""
+    def update_text(
+        self, text: str, start: float | None = None, end: float | None = None
+    ) -> tuple[str, str]:
+        """단어 타임스탬프가 없는 엔진용: 텍스트 겹침만 제거해 이어 붙인다.
+
+        타임스탬프가 없으니 시각으로 정렬할 수 없다. 대신 **한 윈도우 늦게**
+        확정한다 — 새 윈도우가 도착하면 직전 윈도우의 꼬리는 더 바뀌지 않는다고
+        보고 commit 하고, 이번에 새로 나온 부분만 unstable 로 둔다.
+
+        `start`/`end` 는 이 가설이 커버하는 구간의 절대 시각. 없으면 0 이 되어
+        발화의 시작/끝 시각을 표시할 수 없다.
+        """
         self.updates += 1
         text = text.strip()
         if not text:
-            return "", ""
+            return "", join_words(self.unstable)
+
         new_part = _strip_overlap(self._prev_text, text)
         self._prev_text = text
-        if new_part:
-            self.unstable = [
-                Word(t, self.committed_time, self.committed_time)
-                for t in new_part.split()
-            ]
-            self._record_revision()
+        if not new_part:
+            return "", join_words(self.unstable)
+
+        # 직전 윈도우의 꼬리를 확정한다. 이걸 빠뜨리면 unstable 을 덮어쓰면서
+        # 발화 하나에서 마지막 윈도우의 텍스트만 남는다.
+        promoted = self.unstable
+        if promoted:
+            self.committed.extend(promoted)
+            self.committed_time = max(self.committed_time, promoted[-1].end)
+
+        w_start = self.committed_time if start is None else start
+        w_end = w_start if end is None else max(w_start, end)
+        self.unstable = [Word(t, w_start, w_end) for t in new_part.split()]
+
+        self._record_revision()
+        return join_words(promoted), join_words(self.unstable)
+
+    def replace_text(
+        self, text: str, start: float | None = None, end: float | None = None
+    ) -> tuple[str, str]:
+        """발화 전체를 매번 다시 인식하는 엔진용: 가설을 통째로 교체한다.
+
+        매번 같은 구간(발화 시작~현재)을 인식하므로 겹침 제거가 필요 없고,
+        가장 최근 가설이 곧 현재까지의 최선이다. 이어 붙이려 하면 오히려
+        앞 윈도우의 부정확한 인식이 남아 중복된다.
+        """
+        self.updates += 1
+        text = text.strip()
+        self._prev_text = text
+        start = self.committed_time if start is None else start
+        end = start if end is None else max(start, end)
+        self.unstable = [Word(t, start, end) for t in text.split()]
+        self._record_revision()
         return "", join_words(self.unstable)
 
     def _update_with_words(self, words: list[Word]) -> tuple[str, str]:

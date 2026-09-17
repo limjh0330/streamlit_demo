@@ -9,7 +9,12 @@ pandas>=2.0                # 성능 비교 표
 fastapi>=0.110
 uvicorn[standard]>=0.29    # websockets 포함
 
+# ---- ASR 백엔드 -------------------------------------------------------
+sherpa-onnx>=1.10          # Zipformer(streaming) / SenseVoice
+# GPU(CUDA) 를 쓰려면 CPU 휠 대신 CUDA 휠을 설치하세요:
+#   pip install sherpa-onnx -f https://k2-fsa.github.io/sherpa/onnx/cuda.html
+# 모델 파일은 별도로 받습니다:  python -m scripts.fetch_models
+
 # ---- 선택 -------------------------------------------------------------
 scipy>=1.10                # 고품질 리샘플링 (없으면 선형 보간 폴백)
-# sherpa-onnx>=1.10        # Zipformer(streaming) / SenseVoice 백엔드
 # webrtcvad>=2.0.10        # 에너지 VAD 대신 사용 (더 정확)

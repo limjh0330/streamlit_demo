@@ -148,6 +148,110 @@ def test_revision_rate_counts_only_real_revisions() -> None:
     assert grown.revisions == 0, grown.revisions
 
 
+def test_update_text_keeps_earlier_windows() -> None:
+    """타임스탬프 없는 엔진: 발화가 여러 윈도우에 걸쳐도 앞부분이 남아야 한다.
+
+    이전에는 새 윈도우가 unstable 을 통째로 덮어써서 마지막 윈도우의 텍스트만
+    발화로 남았다.
+    """
+    merger = TranscriptMerger()
+    windows = [
+        "환자가 오늘 아침부터",
+        "오늘 아침부터 복통을 호소하고",
+        "복통을 호소하고 구토를 두 번 했습니다",
+    ]
+    for i, text in enumerate(windows):
+        merger.update_text(text, start=i * 3.5, end=i * 3.5 + 5.0)
+
+    utt = merger.finalize()
+    assert utt is not None
+    assert utt.text == "환자가 오늘 아침부터 복통을 호소하고 구토를 두 번 했습니다", utt.text
+    assert utt.end > utt.start, (utt.start, utt.end)   # 시각이 0/0 으로 뭉개지지 않는다
+
+
+def test_replace_text_does_not_accumulate_stale_hypotheses() -> None:
+    """발화 전체를 매번 다시 인식하는 엔진(SenseVoice)은 최신 가설로 교체한다.
+
+    잘린 오디오의 부정확한 인식을 이어 붙이면 "괜찮찮은 척 하려. 괜찮은 척하려고"
+    처럼 중복된다.
+    """
+    merger = TranscriptMerger()
+    merger.replace_text("그는 괜찮찮은 척 하려", start=0.0, end=2.0)
+    merger.replace_text("그는 괜찮은 척하려고 애쓰는", start=0.0, end=3.0)
+    merger.replace_text("그는 괜찮은 척하려고 애쓰는 것 같았다", start=0.0, end=3.5)
+
+    utt = merger.finalize()
+    assert utt is not None
+    assert utt.text == "그는 괜찮은 척하려고 애쓰는 것 같았다", utt.text
+
+
+def test_native_streaming_hypothesis_is_not_double_committed() -> None:
+    """같은 가설을 반복해서 넣어도 LocalAgreement 가 성립하면 안 된다.
+
+    네이티브 스트리밍 엔진은 100 ms 블록마다 같은 가설을 다시 준다. 그대로
+    넣으면 자라는 중인 어절("척" → "척할려고")이 둘 다 확정돼 중복된다.
+    세션이 가설이 바뀌었을 때만 병합기에 넘기는지 확인한다.
+    """
+
+    class GrowingEngine(ASREngine):
+        """어절이 토큰 단위로 자라는 스트리밍 엔진 흉내.
+
+        실제 zipformer 처럼 어절의 **끝 시각이 뒤로 늘어난다**("척" 1.28~1.48 이
+        "척할려고" 1.28~1.90 이 된다). 시각이 고정돼 있으면 병합기의 시각 기준
+        중복 제거에 걸려 버그가 재현되지 않는다.
+        """
+
+        name = "growing"
+        native_streaming = True
+        has_word_timestamps = True
+
+        STAGES = [
+            [("걔는", 0.50, 0.90)],
+            [("걔는", 0.50, 0.90), ("괜찮은", 0.96, 1.28)],
+            [("걔는", 0.50, 0.90), ("괜찮은", 0.96, 1.28), ("척", 1.28, 1.48)],
+            [("걔는", 0.50, 0.90), ("괜찮은", 0.96, 1.28), ("척할려고", 1.28, 1.90)],
+        ]
+
+        def __init__(self, config: StreamConfig) -> None:
+            super().__init__(config)
+            self.calls = 0
+
+        def transcribe(self, audio, t0: float = 0.0, is_final: bool = False) -> ASRResult:
+            return ASRResult()
+
+        def accept_waveform(self, audio) -> None:
+            self.calls += 1
+
+        def partial(self) -> ASRResult:
+            # 각 단계를 여러 블록에 걸쳐 반복해서 돌려준다(실제 엔진과 같음)
+            stage = self.STAGES[min(self.calls // 3, len(self.STAGES) - 1)]
+            words = [Word(t, a, b) for t, a, b in stage]
+            return ASRResult(
+                text=" ".join(w.text for w in words),
+                words=words,
+                audio_sec=0.1,
+                infer_sec=0.001,
+            )
+
+        def is_endpoint(self) -> bool:
+            return False
+
+        def reset_stream(self) -> None:
+            pass
+
+    config = StreamConfig(engine="mock", save_wav=False, medical_correction=False)
+    session = StreamingSession(config, engine=GrowingEngine(config))
+    session.start()
+    block = np.zeros(int(SAMPLE_RATE * 0.1), dtype=np.float32)
+    for _ in range(12):
+        session.feed(block)
+    snapshot = session.stop()
+
+    text = snapshot["stable"]
+    assert "척 척" not in text, text
+    assert text.count("걔는") == 1, text
+
+
 def test_error_rates() -> None:
     reference = "오늘 아침부터 배가 아팠습니다"
     assert wer(reference, reference) == 0.0

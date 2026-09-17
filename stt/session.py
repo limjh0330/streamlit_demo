@@ -96,6 +96,7 @@ class StreamingSession:
         self.started_at: float | None = None
         self.error: str | None = None
         self._last_partial = ""
+        self._last_hypothesis: tuple[str, ...] | str | None = None
 
     # ------------------------------------------------------------------ 수명
     def start(self) -> None:
@@ -108,6 +109,17 @@ class StreamingSession:
             self.error = str(e)
             self._emit(Event("error", {"message": str(e)}))
             raise
+
+        if self.engine.decodes_full_utterance:
+            # 발화 전체를 매번 다시 인식하는 엔진: 윈도우를 최대 발화 길이만큼
+            # 열어 두고(= 잘라내지 않고) refresh_sec 마다 갱신한다.
+            self.buffer = SlidingWindowBuffer(
+                window_sec=self.config.max_utterance_sec,
+                overlap_sec=0.0,
+                min_window_sec=self.config.min_window_sec,
+                first_hop_sec=self.config.first_hop_sec,
+                hop_sec=self.config.refresh_sec,
+            )
 
         if self.config.save_wav:
             self.recorder = WavRecorder(self.session_id)
@@ -213,11 +225,28 @@ class StreamingSession:
         self.engine.accept_waveform(block)
         result = self.engine.partial()
         self.latency.on_inference(result.audio_sec, result.infer_sec)
+        self._merge_native(result)
+        return self.engine.is_endpoint()
+
+    def _merge_native(self, result: ASRResult) -> None:
+        """스트리밍 가설을 병합기에 넣는다. 단, 바뀌었을 때만.
+
+        네이티브 스트리밍 엔진은 블록마다(100 ms) 같은 가설을 다시 준다. 그대로
+        넣으면 LocalAgreement-2 가 "두 번 연속 같았다"를 자동으로 만족해 아직
+        자라는 중인 어절이 확정돼 버린다("척" 확정 후 "척할려고" 가 또 확정).
+        가설이 실제로 바뀐 경우에만 넘겨서 합의 횟수가 의미를 갖게 한다.
+        """
         if result.words:
+            hypothesis = tuple(w.text for w in result.words)
+            if hypothesis == self._last_hypothesis:
+                return
+            self._last_hypothesis = hypothesis
             self._publish(*self.merger.update(result.words))
         elif result.text:
+            if result.text == self._last_hypothesis:
+                return
+            self._last_hypothesis = result.text
             self._publish(*self.merger.update_text(result.text))
-        return self.engine.is_endpoint()
 
     # --- 공통 --------------------------------------------------------------
     def _is_silent(self, audio: np.ndarray) -> bool:
@@ -239,8 +268,14 @@ class StreamingSession:
         self.latency.on_inference(result.audio_sec, result.infer_sec)
         if self.engine.has_word_timestamps and result.words:
             committed, partial = self.merger.update(result.words, window_start=t0)
+        elif self.engine.decodes_full_utterance:
+            committed, partial = self.merger.replace_text(
+                result.text, start=t0, end=t0 + result.audio_sec
+            )
         else:
-            committed, partial = self.merger.update_text(result.text)
+            committed, partial = self.merger.update_text(
+                result.text, start=t0, end=t0 + result.audio_sec
+            )
         self._publish(committed, partial)
 
     def _publish(self, committed: str, partial: str) -> None:
@@ -262,6 +297,7 @@ class StreamingSession:
         """endpoint: 버퍼에 남은 오디오까지 인식하고 발화를 확정."""
         self.latency.on_endpoint()
         if self.engine is not None and self.engine.native_streaming:
+            self._flush_native()
             self.engine.reset_stream()
         else:
             leftover = self.buffer.pop_window(force=True)
@@ -273,6 +309,7 @@ class StreamingSession:
         utt: Utterance | None = self.merger.finalize()
         self.latency.on_final()
         self._last_partial = ""
+        self._last_hypothesis = None
         if utt is None:
             return
         text = self._post(utt.text)
@@ -288,6 +325,17 @@ class StreamingSession:
                 },
             )
         )
+
+    def _flush_native(self) -> None:
+        """네이티브 스트리밍 엔진의 꼬리 토큰을 끌어낸다.
+
+        endpoint 시점에는 마지막 어절의 토큰이 아직 디코더 안에 남아 있다
+        ("같았다" 가 "같았" 로 잘린다). 짧은 무음을 흘려 넣으면 나온다.
+        """
+        assert self.engine is not None
+        tail = np.zeros(int(SAMPLE_RATE * 0.3), dtype=np.float32)
+        self.engine.accept_waveform(tail)
+        self._merge_native(self.engine.partial())
 
     def _flush(self) -> None:
         """스트림 종료 시 남은 오디오/미확정 텍스트를 모두 확정."""

@@ -24,12 +24,19 @@ class SlidingWindowBuffer:
         overlap_sec: float = 1.5,
         min_window_sec: float = 1.0,
         first_hop_sec: float = 1.5,
+        hop_sec: float | None = None,
         sample_rate: int = SAMPLE_RATE,
     ) -> None:
         self.sample_rate = sample_rate
         self.window = int(window_sec * sample_rate)
         self.overlap = int(min(overlap_sec, window_sec * 0.9) * sample_rate)
-        self.hop = max(int(0.2 * sample_rate), self.window - self.overlap)
+        # 보통은 window - overlap 이 hop 이지만, 발화 전체를 매번 다시 인식하는
+        # 엔진은 window 가 발화 길이만큼 크므로 hop 을 직접 준다.
+        self.hop = (
+            max(int(0.2 * sample_rate), self.window - self.overlap)
+            if hop_sec is None
+            else max(int(0.2 * sample_rate), int(hop_sec * sample_rate))
+        )
         self.min_window = int(min_window_sec * sample_rate)
         # 발화 시작 직후 첫 윈도우만 짧게 끊어 first partial latency 를 줄인다.
         self.first_hop = max(self.min_window, min(int(first_hop_sec * sample_rate), self.hop))

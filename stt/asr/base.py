@@ -50,6 +50,10 @@ class ASREngine(ABC):
     native_streaming: bool = False
     #: 단어 단위 타임스탬프를 주는지(병합기의 정렬 전략이 달라진다).
     has_word_timestamps: bool = False
+    #: True 면 sliding window 로 자르지 않고 **발화 전체**를 매번 다시 인식한다.
+    #: SenseVoice 처럼 non-autoregressive 하고 빠른 엔진에 맞는 방식으로,
+    #: 겹침 제거가 필요 없어지고 잘린 오디오를 인식할 때의 오류도 사라진다.
+    decodes_full_utterance: bool = False
 
     def __init__(self, config: StreamConfig) -> None:
         self.config = config

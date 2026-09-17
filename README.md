@@ -34,10 +34,17 @@
 | **파일 전사** | `st.audio_input` / 파일 업로드 | 전체 오디오를 한 번에 전사 |
 
 ASR 백엔드는 어댑터로 분리되어 있어 같은 오디오로 세 엔진을 비교할 수 있습니다.
+셋 다 한국어를 지원하며, 엔진마다 오디오를 넣는 방식이 다릅니다.
 
-- **Whisper** (`faster-whisper`) — 높은 범용성, 안정적인 한국어 baseline. sliding window 방식.
-- **Zipformer** (`sherpa-onnx`) — 진짜 streaming ASR. 프레임 단위 디코딩 + 내장 endpoint 검출.
-- **SenseVoice** (`sherpa-onnx`) — 빠른 non-autoregressive ASR. VAD 로 자른 chunk 단위 추론.
+| 엔진 | 패키지 | 오디오 공급 방식 | 특징 |
+|---|---|---|---|
+| **Whisper** | `faster-whisper` | 5 s sliding window + 1.5 s overlap | 정확도 baseline. autoregressive 라 느림 |
+| **Zipformer** | `sherpa-onnx` | 프레임 단위 `accept_waveform` | 진짜 streaming. 내장 endpoint 검출, 첫 partial 이 가장 빠름 |
+| **SenseVoice** | `sherpa-onnx` | 발화 전체를 0.8 s 마다 재인식 | non-autoregressive. RTF 0.02 로 매우 빠름 |
+
+SenseVoice 는 추론이 워낙 빨라 윈도우를 잘라 넣는 대신 **발화 전체를 매번 다시
+인식**합니다(`decodes_full_utterance`). 잘린 오디오를 인식할 때 생기는 오류와
+윈도우 간 중복이 함께 사라집니다.
 
 ---
 
@@ -52,11 +59,24 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Zipformer / SenseVoice 까지 쓰려면:
+Whisper 모델은 최초 실행 시 자동으로 받습니다. Zipformer / SenseVoice 는
+모델 파일을 먼저 내려받아야 합니다.
 
 ```bash
-pip install sherpa-onnx
-# models/zipformer/, models/sensevoice/ 에 모델 파일 배치 (models/README.md 참고)
+python -m scripts.fetch_models        # 약 360 MB (int8)
+```
+
+| 디렉터리 | 릴리스 |
+|---|---|
+| `models/zipformer/` | `sherpa-onnx-streaming-zipformer-korean-2024-06-16` (한국어 전용) |
+| `models/sensevoice/` | `sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17` (한국어 포함 다국어) |
+
+RunPod GPU 에서는 sherpa-onnx 도 CUDA 휠로 바꾸고 fp32 가중치를 받으세요.
+CPU 휠에 `provider="cuda"` 를 주면 경고만 내고 CPU 로 떨어집니다.
+
+```bash
+pip install sherpa-onnx -f https://k2-fsa.github.io/sherpa/onnx/cuda.html
+python -m scripts.fetch_models --keep all --force
 ```
 
 ## 2. 실행
@@ -103,6 +123,19 @@ python -m server.main --host 127.0.0.1 --port 8000
 streamlit run streamlit_app.py --server.port 8501
 # http://localhost:8501
 ```
+
+### 엔진 비교 (CLI)
+
+Streamlit 없이 같은 오디오를 세 엔진에 통과시켜 지표를 뽑습니다. 결과는
+`transcripts/` 에 저장되어 **성능 비교** 페이지에 그대로 나타납니다.
+
+```bash
+python -m scripts.benchmark recordings/sample.wav --realtime --reference ref.txt
+```
+
+`--realtime` 은 오디오를 실제 속도로 흘려 넣습니다. **지연 지표(first partial /
+final latency)는 이때만 의미가 있습니다** — 한 번에 밀어 넣으면 큐에 쌓인 채로
+측정돼 실제보다 훨씬 작게 나옵니다.
 
 ### 테스트
 
@@ -152,6 +185,10 @@ streamlit_demo/
 ├── server/
 │   ├── main.py               # FastAPI 앱 + REST (상태 조회)
 │   └── websocket.py          # /ws 엔드포인트 (오디오 인입 / 전사 회신)
+│
+├── scripts/
+│   ├── fetch_models.py       # Zipformer / SenseVoice 모델 다운로드
+│   └── benchmark.py          # 같은 오디오로 엔진 비교 (CLI)
 │
 ├── recordings/               # 세션별 원본 WAV
 ├── transcripts/              # 세션별 전사 결과 (.txt / .json)
@@ -204,6 +241,33 @@ Event(partial / final / metrics) → WebSocket JSON → 브라우저 화면
 이 부분이 누락·중복의 주된 원인이라 `tests/test_pipeline.py` 에서
 window/overlap/지터 조합을 훑는 회귀 테스트로 고정해 두었습니다.
 
+### 엔진별 병합 경로
+
+엔진이 주는 정보가 달라서 병합 전략도 셋으로 갈립니다.
+
+| 엔진 | 병합기 진입점 | 이유 |
+|---|---|---|
+| Whisper, Zipformer | `update(words)` | 단어 타임스탬프가 있어 시각 기준 정렬이 가능 |
+| SenseVoice | `replace_text(text)` | 매번 발화 전체를 다시 인식하므로 최신 가설로 교체 |
+| (타임스탬프 없는 윈도우형) | `update_text(text)` | 텍스트 겹침만 제거하고 한 윈도우 늦게 확정 |
+
+여기서 걸렸던 것들 — 모두 회귀 테스트로 고정했습니다.
+
+- **네이티브 스트리밍 엔진은 같은 가설을 반복해서 준다.** Zipformer 는 100 ms
+  블록마다 결과를 주는데 대부분 직전과 같습니다. 그대로 병합기에 넣으면
+  LocalAgreement-2 의 "두 번 연속 같았다" 가 저절로 성립해, 아직 자라는 중인
+  어절이 확정돼 버립니다("척" 확정 → 다음 블록에서 "척할려고" 가 또 확정 →
+  `척 척할려고`). **가설이 실제로 바뀌었을 때만** 넘깁니다.
+- **BPE 토큰을 그대로 이으면 띄어쓰기가 사라진다.** sherpa-onnx 의
+  `get_result()` 는 공백이 지워진 문자열을 줍니다(`걔는괜찮은척하려구`).
+  `get_result_all()` 로 토큰열을 받아 선행 공백(= `▁`)을 어절 경계로 삼아
+  다시 묶습니다.
+- **endpoint 직후에는 마지막 어절이 잘린다.** 디코더 안에 토큰이 남아 있어
+  "같았다" 가 "같았" 로 끝납니다. 0.3 s 무음을 흘려 넣어 끌어냅니다.
+- **발화 전체를 재인식하는 엔진에 겹침 제거를 쓰면 중복된다.** 잘린 오디오의
+  부정확한 인식("괜찮찮은 척 하려")이 뒤의 정확한 인식과 텍스트가 달라
+  `_strip_overlap` 을 빠져나옵니다. 교체 경로(`replace_text`)로 분리했습니다.
+
 ---
 
 ## 5. 지표
@@ -233,6 +297,23 @@ RunPod GPU 인스턴스에서는 `stt/config.py` 의 `default_device()` 가 CUDA
 첫 partial 지연은 `first_hop_sec`(기본 1.5 s)로 조절합니다. 발화 시작 직후
 첫 윈도우만 짧게 끊어 내보내고, 이후에는 `window - overlap`(=3.5 s) 간격으로
 갱신합니다. 값을 줄이면 반응이 빨라지지만 추론 횟수와 CPU 사용이 늘어납니다.
+
+### 엔진 비교 (Apple Silicon CPU, 6.9 s 한국어 진료 발화, `--realtime`)
+
+`python -m scripts.benchmark recordings/... --realtime --reference ref.txt`
+
+| 엔진 | RTF | 첫 partial | final 지연 | WER | CER | 의료용어 recall |
+|---|---|---|---|---|---|---|
+| Whisper `small` | 0.45 | 2638 ms | 783 ms | **0.00** | **0.00** | 1.00 |
+| Zipformer (streaming) | **0.06** | **537 ms** | 17 ms | 0.73 | 0.40 | 0.00 |
+| SenseVoice | 0.03 | 973 ms | 64 ms | 0.18 | 0.03 | 1.00 |
+
+- **Zipformer** 는 첫 partial 이 Whisper 의 1/5 로 압도적으로 빠릅니다. 다만 받아
+  쓴 모델은 일상 대화(KsponSpeech) 로 학습된 것이라 의료 용어에서 많이 틀립니다
+  ("배가 아팠습니다" → "걔가 했습니다"). 의료 도메인에 쓰려면 fine-tuning 이 필요합니다.
+- **SenseVoice** 가 지연·정확도 균형이 가장 좋습니다. CER 0.03 으로 Whisper 에
+  근접하면서 RTF 는 1/15 입니다. 다만 단어 타임스탬프가 없어 발화 단위 시각만 나옵니다.
+- **Whisper** 는 정확도 기준점이지만 첫 partial 이 2.6 s 로 가장 느립니다.
 
 ### 튜닝하며 알게 된 것
 
@@ -272,6 +353,6 @@ RunPod GPU 인스턴스에서는 `stt/config.py` 의 `default_device()` 가 CUDA
 | 2. Whisper baseline (sliding window + overlap, partial) | 구현 완료 |
 | 3. Transcript merge (stable/unstable, overlap dedup) | 구현 완료 · 회귀 테스트 |
 | 4. Metrics logging (RTF, latency, 자원 사용) | 구현 완료 |
-| 5. Zipformer backend (sherpa-onnx, native streaming, endpoint) | 코드 완료 · **모델 파일 필요** |
-| 6. SenseVoice backend (VAD + chunk 추론) | 코드 완료 · **모델 파일 필요** |
-| 7. 동일 의료 데이터셋 비교 | 비교 화면 완료 · 데이터셋 필요 |
+| 5. Zipformer backend (sherpa-onnx, native streaming, endpoint) | 구현 완료 · 한국어 모델 연결 |
+| 6. SenseVoice backend (발화 전체 재인식) | 구현 완료 · 한국어 모델 연결 |
+| 7. 동일 의료 데이터셋 비교 | 비교 화면 + `scripts/benchmark.py` 완료 · **데이터셋 필요** |
