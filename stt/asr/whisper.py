@@ -36,6 +36,7 @@ class WhisperEngine(ASREngine):
     name = "whisper"
     native_streaming = False
     has_word_timestamps = True
+    shared_model = True                    # load_whisper_model() 프로세스 캐시
 
     def __init__(self, config: StreamConfig) -> None:
         super().__init__(config)
@@ -84,7 +85,7 @@ class WhisperEngine(ASREngine):
             is_final=is_final,
         )
 
-    def warmup(self) -> float:
+    def warmup(self, strict: bool = False) -> float:
         """첫 추론 지연을 미리 소진한다.
 
         주의: `initial_prompt` 를 붙인 채 무음을 디코딩하면 Whisper 가 프롬프트를

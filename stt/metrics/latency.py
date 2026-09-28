@@ -138,3 +138,20 @@ def gpu_memory_mb() -> float | None:
     except Exception:
         pass
     return None
+
+
+def gpu_available() -> bool:
+    """CUDA GPU 를 쓸 수 있는지. torch(Fun-ASR) 또는 CTranslate2(Whisper) 기준."""
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            return True
+    except Exception:
+        pass
+    try:
+        import ctranslate2
+
+        return ctranslate2.get_cuda_device_count() > 0
+    except Exception:
+        return False

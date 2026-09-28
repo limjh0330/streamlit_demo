@@ -32,19 +32,26 @@ def get_engine(size: str, language: str, device: str, compute_type: str):
     )
 
 
+# 이 페이지에는 운용 중 조절할 값이 없다. 전부 "Setting" 으로 접어 둔다.
 with st.sidebar:
-    size = st.selectbox("모델 크기", WHISPER_SIZES, index=2)
-    lang = st.text_input("언어 코드", "ko", help="비우면 자동 감지")
-    beam_size = st.slider("beam size", 1, 10, 5,
-                          help="후보를 여러 개 유지하는 beam search 폭. 클수록 정확·느림")
-    devices = ["cpu", "cuda"]
-    device = st.selectbox("device", devices, index=devices.index(default_device()))
-    compute_types = ["int8", "int8_float16", "float16", "float32"]
-    compute_type = st.selectbox(
-        "compute type", compute_types,
-        index=compute_types.index(default_compute_type(device)),
-    )
-    correction = st.toggle("의료 용어 교정", True)
+    with st.expander("Setting", icon=":material/settings:"):
+        st.caption("모델")
+        size = st.selectbox("모델 크기", WHISPER_SIZES, index=2)
+        lang = st.text_input("언어 코드", "ko", help="비우면 자동 감지")
+        beam_size = st.slider("beam size", 1, 10, 5,
+                              help="후보를 여러 개 유지하는 beam search 폭. 클수록 정확·느림")
+
+        st.caption("실행")
+        devices = ["cpu", "cuda"]
+        device = st.selectbox("device", devices, index=devices.index(default_device()))
+        compute_types = ["int8", "int8_float16", "float16", "float32"]
+        compute_type = st.selectbox(
+            "compute type", compute_types,
+            index=compute_types.index(default_compute_type(device)),
+        )
+
+        st.caption("처리")
+        correction = st.toggle("의료 용어 교정", True)
 
 source = st.segmented_control("입력", ["업로드", "녹음"], default="업로드")
 

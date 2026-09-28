@@ -47,61 +47,72 @@ def backend_engines(api_url: str) -> dict:
 defaults = StreamConfig()
 
 # ------------------------------------------------------------------ 설정
+# 운용 중 손댈 값은 VAD 민감도 하나뿐이다. 나머지는 한 번 정해 두는 값이라
+# "Setting" 으로 접어 두어 실수로 바뀌는 일을 줄인다.
 with st.sidebar:
-    st.subheader("백엔드")
-    api_url = st.text_input("REST 주소 (Python → 백엔드)", API_URL)
-    ws_url = st.text_input(
-        "WebSocket 주소 (브라우저 → 백엔드)",
-        WS_URL,
-        placeholder=f"비우면 주소창에서 유도 (포트 {BACKEND_PORT})",
-        help="RunPod 은 포트마다 호스트가 달라 자동 유도합니다. "
-        f"다르게 노출했다면 wss://…{WS_BROWSER_PATH} 를 직접 적으세요.",
-    )
-
-    try:
-        info = backend_engines(api_url)
-    except Exception as e:
-        info = None
-        st.error(f"백엔드에 연결하지 못했습니다: {e}", icon=":material/error:")
-        st.code("python -m server.main --host 0.0.0.0 --port %d" % BACKEND_PORT,
-                language="bash")
-
-    ready = {name for name, meta in (info or {}).get("engines", {}).items() if meta["ready"]}
-
-    st.subheader("엔진")
-    engine = st.selectbox(
-        "ASR 엔진",
-        ENGINE_CHOICES,
-        index=ENGINE_CHOICES.index(defaults.engine),
-        format_func=lambda n: (
-            "Fun-ASR-MLT-Nano-2512" if n == "funasr_mlt_nano" else n
-        ) if not info or n in ready else f"{n} (모델 없음)",
-    )
-    if info and engine not in ready:
-        st.warning(info["engines"][engine]["detail"], icon=":material/warning:")
-    model_size = st.selectbox("Whisper 모델", WHISPER_SIZES, index=2,
-                              disabled=engine != "whisper")
-    language = st.text_input("언어 코드", "ko", help="비우면 자동 감지")
-
-    st.subheader("스트리밍")
-    chunk_ms = st.select_slider("청크 길이 (ms)", CHUNK_MS_CHOICES, value=100,
-                                help="브라우저가 한 번에 보내는 오디오 길이")
-    window_sec = st.slider("window (초)", 2.0, 10.0, defaults.window_sec, 0.5)
-    overlap_sec = st.slider("overlap (초)", 0.0, 4.0, defaults.overlap_sec, 0.5)
-    silence_sec = st.slider("발화 종료 무음 (초)", 0.2, 3.0, defaults.silence_sec, 0.1)
+    st.subheader("사용자 조절 가능")
     vad_db = st.slider("VAD 민감도 (dB)", 4.0, 24.0, defaults.vad_threshold_db, 1.0,
                        help="낮을수록 민감. 노이즈 플로어 대비 마진입니다.")
 
-    st.subheader("처리")
-    correction = st.toggle("의료 용어 교정", True)
-    save_wav = st.toggle("원본 WAV 저장", True)
-
-    if engine == "funasr_mlt_nano":
-        st.info(
-            "800M 다국어 모델입니다. 현재 타임스탬프가 없어 발화 전체를 재인식하며, "
-            "성능 비교에는 RTF·지연·WER/CER이 저장됩니다.",
-            icon=":material/info:",
+    with st.expander("Setting", icon=":material/settings:"):
+        st.caption("백엔드")
+        api_url = st.text_input("REST 주소 (Python → 백엔드)", API_URL)
+        ws_url = st.text_input(
+            "WebSocket 주소 (브라우저 → 백엔드)",
+            WS_URL,
+            placeholder=f"비우면 주소창에서 유도 (포트 {BACKEND_PORT})",
+            help="RunPod 은 포트마다 호스트가 달라 자동 유도합니다. "
+            f"다르게 노출했다면 wss://…{WS_BROWSER_PATH} 를 직접 적으세요.",
         )
+
+        try:
+            info = backend_engines(api_url)
+        except Exception as e:
+            info = None
+            st.error(f"백엔드에 연결하지 못했습니다: {e}", icon=":material/error:")
+            st.code("python -m server.main --host 0.0.0.0 --port %d" % BACKEND_PORT,
+                    language="bash")
+
+        ready = {name for name, meta in (info or {}).get("engines", {}).items()
+                 if meta["ready"]}
+
+        st.caption("엔진")
+        engine = st.selectbox(
+            "ASR 엔진",
+            ENGINE_CHOICES,
+            # 서버가 preload 해 둔 엔진을 기본으로 고른다(모델을 다시 올리지 않게)
+            index=ENGINE_CHOICES.index(
+                (info or {}).get("active_engine")
+                if (info or {}).get("active_engine") in ENGINE_CHOICES
+                else defaults.engine
+            ),
+            format_func=lambda n: (
+                "Fun-ASR-MLT-Nano-2512" if n == "funasr_mlt_nano" else n
+            ) if not info or n in ready else f"{n} (모델 없음)",
+        )
+        if info and engine not in ready:
+            st.warning(info["engines"][engine]["detail"], icon=":material/warning:")
+        model_size = st.selectbox("Whisper 모델", WHISPER_SIZES, index=2,
+                                  disabled=engine != "whisper")
+        language = st.text_input("언어 코드", "ko", help="비우면 자동 감지")
+
+        st.caption("스트리밍")
+        chunk_ms = st.select_slider("청크 길이 (ms)", CHUNK_MS_CHOICES, value=100,
+                                    help="브라우저가 한 번에 보내는 오디오 길이")
+        window_sec = st.slider("window (초)", 2.0, 10.0, defaults.window_sec, 0.5)
+        overlap_sec = st.slider("overlap (초)", 0.0, 4.0, defaults.overlap_sec, 0.5)
+        silence_sec = st.slider("발화 종료 무음 (초)", 0.2, 3.0, defaults.silence_sec, 0.1)
+
+        st.caption("처리")
+        correction = st.toggle("의료 용어 교정", True)
+        save_wav = st.toggle("원본 WAV 저장", True)
+
+        if engine == "funasr_mlt_nano":
+            st.info(
+                "800M 다국어 모델입니다. 현재 타임스탬프가 없어 발화 전체를 재인식하며, "
+                "성능 비교에는 RTF·지연·WER/CER이 저장됩니다.",
+                icon=":material/info:",
+            )
 
 if info:
     st.caption(

@@ -23,8 +23,10 @@ External Backend 용 `/ws/v1/stt/stream` 은 `backend_ws.py` 에 있다. 세션 
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import json
 import logging
+import threading
 from pathlib import Path
 from typing import Callable
 
@@ -33,25 +35,12 @@ from fastapi import WebSocket, WebSocketDisconnect
 from stt.config import SAMPLE_RATE, TRANSCRIPTS_DIR, StreamConfig
 from stt.session import Event, StreamingSession
 
+from .runtime import RUNTIME, _config_from  # noqa: F401  (_config_from: 기존 import 경로 유지)
+
 log = logging.getLogger("stt.ws")
 
 #: 살아있는 세션 (session_id -> StreamingSession)
 SESSIONS: dict[str, StreamingSession] = {}
-
-
-def _config_from(payload: dict) -> StreamConfig:
-    """클라이언트가 보낸 start 페이로드에서 StreamConfig 를 만든다."""
-    cfg = StreamConfig()
-    for key, value in payload.items():
-        if key in ("type", "sample_rate"):
-            continue
-        if hasattr(cfg, key) and value is not None:
-            current = getattr(cfg, key)
-            try:
-                setattr(cfg, key, type(current)(value) if current is not None else value)
-            except (TypeError, ValueError):
-                setattr(cfg, key, value)
-    return cfg
 
 
 # ---------------------------------------------------------------- 공용 헬퍼
@@ -70,12 +59,18 @@ def event_bridge(
 async def open_session(
     config: StreamConfig, on_event: Callable[[Event], None]
 ) -> StreamingSession:
-    """세션 생성 + 모델 로드 + warmup. 실패하면 워커까지 정리하고 다시 던진다."""
+    """세션 생성 + 모델 로드 + warmup. 실패하면 워커까지 정리하고 다시 던진다.
+
+    서버 시작 시 preload 가 진행 중이면 끝날 때까지 기다린다(같은 모델을 두 번
+    올리지 않게). preload·warm-up 된 공유 모델을 쓰는 세션은 warm-up 을 건너뛴다.
+    """
+    await asyncio.to_thread(RUNTIME.wait_settled)
     session = StreamingSession(config, on_event=on_event)
     try:
         # 모델 로드는 수 초 걸릴 수 있으므로 이벤트 루프를 막지 않는다
         await asyncio.to_thread(session.start)
-        await asyncio.to_thread(session.engine.warmup)
+        if not RUNTIME.is_warm(config, session.engine):
+            await asyncio.to_thread(session.engine.warmup)
     except Exception:
         await asyncio.to_thread(session.stop)
         raise
@@ -84,17 +79,34 @@ async def open_session(
 
 
 async def close_session(session: StreamingSession) -> tuple[dict, Path | None]:
-    """잔여 오디오 flush → recorder 정리 → 전사 저장. (summary, 전사 경로)."""
-    try:
-        summary = await asyncio.to_thread(session.stop)
+    """잔여 오디오 flush → recorder 정리 → 전사 저장. (summary, 전사 경로).
+
+    정리는 전용 스레드에서 순서대로 끝내고, SESSIONS 에서는 맨 마지막에 뺀다.
+    `asyncio.to_thread()` 를 쓰면 핸들러 코루틴이 취소될 때(연결 끊김 중 서버 종료,
+    테스트 클라이언트 등) 아직 시작 전인 작업이 스레드풀 큐에서 함께 취소돼
+    정리가 아예 안 되거나 recorder 가 열린 채 남을 수 있다. 그래서 작업을 먼저
+    RUNNING 상태로 만든 뒤 스레드를 띄운다 — 기다리던 쪽이 취소돼도 정리는 끝까지 돈다.
+    """
+    directory = TRANSCRIPTS_DIR
+    future: concurrent.futures.Future = concurrent.futures.Future()
+    future.set_running_or_notify_cancel()            # 이후 cancel() 은 효과 없음
+
+    def _close() -> None:
         try:
-            path = await asyncio.to_thread(session.save_transcript, TRANSCRIPTS_DIR)
-        except Exception:
-            log.exception("transcript save failed: %s", session.session_id)
-            path = None
-    finally:
-        SESSIONS.pop(session.session_id, None)
-    return summary, path
+            summary = session.stop()
+            try:
+                path = session.save_transcript(directory)
+            except Exception:
+                log.exception("transcript save failed: %s", session.session_id)
+                path = None
+            future.set_result((summary, path))
+        except BaseException as e:                   # noqa: BLE001 — 호출자에게 그대로 전달
+            future.set_exception(e)
+        finally:
+            SESSIONS.pop(session.session_id, None)
+
+    threading.Thread(target=_close, name=f"stt-close-{session.session_id}").start()
+    return await asyncio.wrap_future(future)
 
 
 # ---------------------------------------------------------------- /ws/v1/stt/browser
@@ -154,7 +166,8 @@ async def stt_endpoint(ws: WebSocket) -> None:
                                                   ensure_ascii=False))
                     session = None
                     continue
-                log.info("session started: %s (%s)", session.session_id, config.engine)
+                log.info("[STT] Session opened (browser): stt=%s engine=%s",
+                         session.session_id, config.engine)
 
             elif kind == "stop":
                 break
@@ -191,7 +204,7 @@ async def stt_endpoint(ws: WebSocket) -> None:
                 )
             except Exception:
                 pass
-            log.info("session closed: %s", session.session_id)
+            log.info("[STT] Session closed (browser): stt=%s", session.session_id)
         if sender is not None:
             sender.cancel()
         try:

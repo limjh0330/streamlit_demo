@@ -20,11 +20,9 @@ STT -> Backend (JSON 텍스트)
 책임 범위는 Audio → Transcript 까지다. conversation/turn 번호, KTAS 판단,
 LLM 호출, 화자 역할(환자/의료진) 추정은 Backend 가 하므로 여기서 만들지 않는다.
 
-엔진/윈도우 같은 ASR 설정은 Backend 가 몰라도 되도록 서버 환경변수로 정한다.
-    STT_ENGINE       whisper | zipformer | sensevoice | funasr_mlt_nano
-    STT_MODEL_SIZE   whisper 모델 크기
-    STT_CONFIG       StreamConfig 필드 JSON (예: {"silence_sec":0.6,"save_wav":false})
-    STT_TIMESTAMPS   final 에 start_time/end_time 포함 여부 (기본 1)
+엔진/윈도우 같은 ASR 설정은 Backend 가 몰라도 되도록 서버가 정한다. 서버 시작 시
+환경변수(STT_ENGINE, STT_MODEL_SIZE, STT_CONFIG, STT_TIMESTAMPS)를 한 번 읽은
+활성 설정(`runtime.RUNTIME`)을 preload 와 모든 세션이 함께 쓴다.
 """
 from __future__ import annotations
 
@@ -32,7 +30,6 @@ import asyncio
 import json
 import logging
 import math
-import os
 import time
 import uuid
 
@@ -41,7 +38,8 @@ from fastapi import WebSocket, WebSocketDisconnect
 from stt.config import SAMPLE_RATE, StreamConfig
 from stt.session import Event
 
-from .websocket import _config_from, close_session, event_bridge, open_session
+from .runtime import RUNTIME
+from .websocket import close_session, event_bridge, open_session
 
 log = logging.getLogger("stt.ws.backend")
 
@@ -62,26 +60,12 @@ _STOP = object()      # outbox sentinel: done 없이 종료(비정상 연결 끊
 
 
 def backend_config() -> StreamConfig:
-    """`/ws/v1/stt/stream` 세션 설정. Backend 요청이 아니라 서버 환경변수에서 정한다."""
-    overrides: dict = {}
-    raw = os.getenv("STT_CONFIG", "").strip()
-    if raw:
-        try:
-            parsed = json.loads(raw)
-        except json.JSONDecodeError:
-            parsed = None
-        if isinstance(parsed, dict):
-            overrides.update(parsed)
-        else:
-            log.warning("STT_CONFIG 는 JSON 객체여야 합니다 — 무시합니다")
-    for env, key in (("STT_ENGINE", "engine"), ("STT_MODEL_SIZE", "model_size")):
-        if os.getenv(env):
-            overrides[key] = os.environ[env]
-    return _config_from(overrides)
+    """`/ws/v1/stt/stream` 세션 설정 = 서버 활성 설정(preload 와 같은 설정)."""
+    return RUNTIME.stream_config()
 
 
 def _include_timestamps() -> bool:
-    return os.getenv("STT_TIMESTAMPS", "1").strip().lower() not in ("0", "false", "no")
+    return RUNTIME.timestamps
 
 
 def _triage_session_id(ws: WebSocket) -> str | None:
@@ -214,7 +198,7 @@ async def backend_stt_endpoint(ws: WebSocket) -> None:
         return
 
     stt_id = session.session_id
-    log.info("backend session started: stt=%s triage=%s engine=%s",
+    log.info("[STT] Session opened: stt=%s triage=%s engine=%s",
              stt_id, triage_id, session.engine.name)
     writer = BackendEventWriter(ws, timestamps=_include_timestamps())
     sender = asyncio.create_task(writer.run(outbox))
@@ -287,5 +271,5 @@ async def backend_stt_endpoint(ws: WebSocket) -> None:
                     pass
             else:
                 sender.cancel()                   # 이미 끊긴 소켓에 보낼 필요 없음
-        log.info("backend session closed: stt=%s triage=%s graceful=%s frames=%d irregular=%d",
+        log.info("[STT] Session closed: stt=%s triage=%s graceful=%s frames=%d irregular=%d",
                  stt_id, triage_id, graceful, frames.frames, frames.irregular)

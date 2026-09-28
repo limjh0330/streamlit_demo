@@ -94,9 +94,10 @@ Whisper 는 첫 실행 때 Hugging Face 캐시(`~/.cache/huggingface`)로 자동
 ### 2.3 실행
 
 ```bash
-# STT 서버 (API) — 기본 엔진은 Fun-ASR-MLT-Nano. 다른 엔진은 STT_ENGINE 으로 선택
-python -m server.main --host 0.0.0.0 --port 8000
-STT_ENGINE=sensevoice python -m server.main --host 0.0.0.0 --port 8000
+# STT 서버 (API) — 기본 엔진 Fun-ASR-MLT-Nano 를 preload → warm-up → READY
+./start_server.sh
+STT_ENGINE=funasr_mlt_nano ./start_server.sh          # 다른 엔진 (밖에서 준 환경변수가 우선)
+python -m server.main --host 0.0.0.0 --port 8000 # 스크립트 없이 직접 실행해도 같다
 
 # Streamlit UI (선택)
 streamlit run streamlit_app.py --server.port 8501 --server.address 0.0.0.0
@@ -105,13 +106,12 @@ streamlit run streamlit_app.py --server.port 8501 --server.address 0.0.0.0
 ### 2.4 동작 확인
 
 ```bash
-curl http://localhost:8000/api/v1/stt/health
-# {"status":"ok","sample_rate":16000,"active_sessions":[],"gpu_memory_mb":null}
+curl -s http://localhost:8000/api/v1/stt/health          # liveness: {"status":"OK", ...}
+curl -s http://localhost:8000/api/v1/stt/health/ready    # readiness: LOADING(503) → READY(200)
+curl -s http://localhost:8000/api/v1/stt/engines         # active_engine, 엔진별 준비 상태
 
-curl http://localhost:8000/api/v1/stt/engines     # 엔진별 준비 상태
+python -m scripts.stt_client recordings/sample.wav       # 실제 모델로 E2E (READY 를 기다렸다가 전송)
 ```
-
-오디오를 실제로 보내 보려면 [5.4 클라이언트 예제](#54-클라이언트-예제) 를 실행하세요.
 
 ---
 
@@ -256,7 +256,10 @@ WebSocket 어댑터                      → /stream: transcript 규격 / /brows
 ### 4.5 세션 수명과 종료(flush)
 
 ```
-open_session()   StreamingSession 생성 → start()(모델 로드, 워커 시작) → warmup()
+서버 시작        RUNTIME.configure()  환경변수 → 활성 설정 고정 (source of truth)
+                 RUNTIME.start_preload()  create_engine(활성 설정) → warmup(strict) → READY
+open_session()   preload 가 끝날 때까지 대기 → StreamingSession 생성 → start()(엔진 인스턴스, 워커)
+                 → 공유 모델이 이미 warm 이면 warmup() 생략
 feed() × N       오디오 블록 투입
 close_session()  stop(): 큐 잔여 처리 → 버퍼/디코더 flush → 마지막 final emit
                         → recorder close → 요약 반환
@@ -265,6 +268,21 @@ close_session()  stop(): 큐 잔여 처리 → 버퍼/디코더 flush → 마지
 
 `/ws/v1/stt/stream` 은 `close` 를 받으면 위 flush 가 **끝난 뒤**에 `done` 을 보냅니다.
 `stop()` 안에서 나온 final 은 `done` 보다 항상 먼저 전송됩니다.
+
+`close_session()` 은 정리를 전용 스레드에서 끝까지 수행하고 `SESSIONS` 에서는 맨 마지막에 뺍니다.
+연결 처리 코루틴이 취소되더라도(서버 종료 등) 워커·WAV recorder 정리가 빠지지 않습니다.
+
+#### 모델 공유와 동시성
+
+| 엔진 | 가중치 | 세션별로 따로인 것 | 동시 추론 |
+|---|---|---|---|
+| Fun-ASR | 프로세스당 1회 로드(`_MODEL_CACHE`) | 엔진 인스턴스, VAD, 버퍼, 병합기 | 모델 단위 공유 lock 으로 **한 번에 하나씩** |
+| Whisper | 프로세스당 1회 로드 | 〃 | 인스턴스별 lock (CTranslate2 내부에서 직렬 처리) |
+| SenseVoice / Zipformer | **연결마다 로드** | recognizer 포함 전부 | 연결별 독립 |
+
+`AutoModel.generate()` 의 동시 호출 안전성이 보장되지 않아, 세션 A/B/C 의 Fun-ASR 추론은
+공유 lock 으로 직렬화합니다. 세션 하나일 때는 기다림이 없어 기존 성능과 같고, 세션이 늘면
+추론이 순서대로 처리되므로 **동시 세션 수 × RTF < 1** 안에서 운영해야 실시간이 유지됩니다.
 
 ### 4.6 세션 이벤트 (내부)
 
@@ -291,8 +309,9 @@ REST 는 **`/api/v1/stt`**, WebSocket 은 **`/ws/v1/stt`** 를 base path 로 씁
 |---|---|---|
 | WebSocket | `/ws/v1/stt/stream` | **외부 서비스용 실시간 전사** |
 | WebSocket | `/ws/v1/stt/browser` | Streamlit 실시간 전사 페이지 전용 |
-| GET | `/api/v1/stt/health` | 서버 상태, 활성 세션 |
-| GET | `/api/v1/stt/engines` | 엔진별 설치·모델 준비 상태, 기본 설정 |
+| GET | `/api/v1/stt/health` | **liveness** — 프로세스가 살아 있으면 항상 200 |
+| GET | `/api/v1/stt/health/ready` | **readiness** — 모델 로드·warm-up 완료 시 200(`READY`), 아니면 503 |
+| GET | `/api/v1/stt/engines` | 실제 사용 중인 엔진(`active_engine`), 엔진별 설치·로드 상태 |
 | GET | `/api/v1/stt/sessions` | 활성 / 저장된 세션 ID (최근 50개) |
 | GET | `/api/v1/stt/sessions/{session_id}/transcript` | 저장된 전사 결과(JSON) |
 | GET | `/api/v1/stt/sessions/{session_id}/audio` | 저장된 녹음(WAV) |
@@ -348,7 +367,7 @@ wss://<podId>-8000.proxy.runpod.net/ws/v1/stt/stream     # RunPod 프록시
 
 | message | 상황 | 이후 |
 |---|---|---|
-| `STT engine initialization failed` | 모델 로드 실패 | 연결 종료 (1011) |
+| `STT engine initialization failed` | 세션 엔진 초기화 실패 (preload 가 실패해 첫 연결에서 다시 로드하다 실패한 경우 등) | 연결 종료 (1011) |
 | `STT inference failed` | 추론 중 오류 (초당 최대 1회 통지) | 계속 동작 |
 | `Invalid audio frame` | 1 s 초과 프레임 | 해당 프레임만 버림 |
 | `Unknown control message` | `close` 가 아닌 text frame | 계속 동작 |
@@ -358,7 +377,7 @@ wss://<podId>-8000.proxy.runpod.net/ws/v1/stt/stream     # RunPod 프록시
 
 ```
 Backend                                     STT
-  ── connect /ws/v1/stt/stream ────────────▶  세션 생성 · 모델 로드
+  ── connect /ws/v1/stt/stream ────────────▶  세션 생성 (모델은 서버 시작 시 preload 완료)
   ── <3200 B> <3200 B> <3200 B> … ─────────▶
   ◀── {"type":"transcript","text":"가슴이","is_final":false}
   ◀── {"type":"transcript","text":"가슴이 답답해요","is_final":false}
@@ -374,11 +393,45 @@ Backend                                     STT
 
 ### 5.3 REST API
 
+#### Liveness / Readiness
+
 ```bash
-curl http://localhost:8000/api/v1/stt/health
-curl http://localhost:8000/api/v1/stt/engines
-# {"engines":{"whisper":{"ready":true,"detail":"faster-whisper"}, ...},
-#  "whisper_sizes":["tiny","base","small","medium","large-v3"], "defaults":{...}}
+curl -s http://localhost:8000/api/v1/stt/health
+# 200 {"status":"OK","sample_rate":16000,"active_sessions":[],"gpu_memory_mb":null}
+```
+
+`/health` 는 모델 상태와 무관하게 프로세스만 봅니다. 트래픽을 보내도 되는지는 `/health/ready` 로 판단하세요.
+
+```jsonc
+// GET /api/v1/stt/health/ready
+// 200 — 모델 로드 + warm-up 추론까지 완료
+{"status":"READY","engine":"funasr_mlt_nano","device":"cuda","model_loaded":true,
+ "gpu_available":true,"gpu_memory_mb":2500.0,"sample_rate":16000,"active_sessions":0,
+ "load_sec":15.0,"warmup_sec":1.2,"output_time":1788095605.9}
+
+// 503 — 로딩 중 (이때 연결해도 오류 없이 READY 까지 기다렸다가 처리됨)
+{"status":"LOADING","engine":"funasr_mlt_nano","model_loaded":false,"gpu_available":true, ...}
+
+// 503 — 초기화 실패 (상세 원인은 서버 로그에만)
+{"status":"NOT_READY","engine":"funasr_mlt_nano","model_loaded":false,"gpu_available":true,
+ "error":"FileNotFoundError: model initialization failed (see server log)", ...}
+```
+
+#### 엔진
+
+```bash
+curl -s http://localhost:8000/api/v1/stt/engines
+# {"active_engine":"funasr_mlt_nano","active_status":"READY","active_config":{...},
+#  "engines":{"funasr_mlt_nano":{"ready":true,"loaded":true,...},"whisper":{"ready":true,"loaded":false,...}, ...},
+#  "whisper_sizes":[...], "defaults":{...}}
+```
+
+`active_engine` / `active_config` 는 서버가 **실제로** 쓰는 설정(= preload 엔진 = `/stream` 세션 엔진),
+`defaults` 는 설정을 주지 않았을 때의 코드 기본값입니다. `ready` 는 패키지·모델 파일 준비, `loaded` 는 메모리 적재 여부입니다.
+
+#### 세션 조회
+
+```bash
 
 curl http://localhost:8000/api/v1/stt/sessions
 # {"active":[],"saved":["20260927-172618-6ed053", ...]}
@@ -505,7 +558,7 @@ ws.onmessage = ({ data }) => {
 - **연결 하나 = 오디오 스트림 하나.** 여러 세션의 오디오를 한 연결에 섞지 않습니다.
 - **final 만 저장합니다.** partial 은 같은 발화의 중간 결과라 계속 바뀝니다.
 - **`close` 후 `done` 을 받을 때까지 연결을 유지합니다.** 마지막 발화의 final 은 `close` 이후에 옵니다.
-- **연결 직후에는 모델 로드 시간만큼 응답이 늦을 수 있습니다.** 그동안 보낸 오디오는 버려지지 않습니다.
+- **연결 전에 `/api/v1/stt/health/ready` 가 `READY`(200)인지 확인합니다.** 로딩 중에 연결해도 오류 없이 READY 까지 기다렸다가 처리하며, 그동안 보낸 오디오는 버려지지 않습니다.
 - **실시간 속도(100 ms 간격)로 보내는 것을 권장합니다.** 한 번에 밀어 넣으면 서버 큐에 쌓여 partial 이 몰려 옵니다.
 - **시각은 연결 기준 상대값입니다.** 재연결하면 0 부터 다시 셉니다.
 - **`initialization failed` / `Internal STT server error` 는 연결이 끊기므로 재연결**하고, 나머지 오류는 기록만 하고 계속 보냅니다.
@@ -546,11 +599,16 @@ Streamlit 실시간 전사 페이지(`web/live_mic.js`) 전용입니다. 외부 
 | `STT_MODEL_SIZE` | `small` | `/stream` | Whisper 모델 크기 |
 | `STT_CONFIG` | (없음) | `/stream` | `StreamConfig` 필드 덮어쓰기 JSON. 예: `{"silence_sec":0.6,"save_wav":false}` |
 | `STT_TIMESTAMPS` | `1` | `/stream` | final 에 `start_time`/`end_time` 포함 |
+| `STT_PRELOAD` | `1` | 서버 | 시작 시 활성 엔진 preload·warm-up. `0` 이면 첫 연결에서 로드(개발용, readiness 는 `NOT_READY`) |
+| `STT_HOST` | `0.0.0.0` | `start_server.sh` | 바인드 주소 |
+| `PYTHON` | `.venv/bin/python` → `python` | `start_server.sh` | 사용할 인터프리터 |
 | `STT_BACKEND_PORT` | `8000` | Streamlit | 브라우저 WS 주소 유도에 쓰는 포트 |
 | `STT_API_URL` | `http://127.0.0.1:8000` | Streamlit | Python → STT 서버 (같은 인스턴스) |
 | `STT_WS_URL` | (비움 → 자동 유도) | Streamlit | 브라우저 → STT 서버. RunPod 은 `<podId>-<port>.proxy.runpod.net` 으로 유도 |
 
-`/stream` 설정은 **연결마다** 환경변수에서 읽어 `StreamConfig` 를 만듭니다. Backend 는 엔진 설정을 보내지 않습니다.
+서버 설정은 **서버가 시작할 때 한 번** 환경변수에서 읽어 고정합니다(`server/runtime.py` 의 `RUNTIME`).
+preload, `/stream` 세션, `/engines`·`/health/ready` 가 모두 이 설정을 보므로 "preload 는 funasr, 세션은 whisper"
+같은 불일치가 생기지 않습니다. 설정을 바꾸려면 서버를 재시작하세요. Backend 는 엔진 설정을 보내지 않습니다.
 
 ### 6.2 `StreamConfig` (`stt/config.py`)
 
@@ -661,7 +719,8 @@ streamlit run streamlit_app.py --server.port 8501
 ```
 streamlit_demo/
 ├── server/                      # ── STT 서버 (FastAPI) ──
-│   ├── main.py                  # 앱, REST /api/v1/stt/*, WS 라우터 등록
+│   ├── main.py                  # 앱, lifespan(preload), REST /api/v1/stt/*, WS 라우터 등록
+│   ├── runtime.py               # 활성 설정(source of truth) · preload · readiness 상태
 │   ├── backend_ws.py            # /ws/v1/stt/stream — External Backend 어댑터
 │   └── websocket.py             # /ws/v1/stt/browser + 세션 공용 헬퍼(open/close_session)
 │
@@ -682,8 +741,9 @@ streamlit_demo/
 ├── app_pages/                   # realtime · file_stt · metrics
 ├── web/                         # live_mic.{py,js,html,css} — 브라우저 마이크 컴포넌트
 │
-├── scripts/                     # fetch_models · benchmark · evaluate_dataset 외 평가 도구
-├── tests/                       # test_pipeline · test_backend_ws
+├── start_server.sh              # RunPod 운영 실행 스크립트
+├── scripts/                     # stt_client(Real E2E) · fetch_models · benchmark · evaluate_dataset 외
+├── tests/                       # test_pipeline · test_backend_ws · test_runtime · test_streamlit_pages
 │
 ├── models/                      # 모델 파일 (zipformer · sensevoice · funasr_mlt_nano)
 ├── recordings/                  # 세션별 WAV
@@ -695,7 +755,8 @@ streamlit_demo/
 
 1. `stt/asr/<name>.py` 에 `ASREngine` 을 상속해 `transcribe()` 를 구현합니다
    (스트리밍 엔진이면 `accept_waveform` / `partial` / `is_endpoint` / `reset_stream` 도).
-2. `native_streaming` · `decodes_full_utterance` · `has_word_timestamps` 를 엔진 특성에 맞게 설정합니다.
+2. `native_streaming` · `decodes_full_utterance` · `has_word_timestamps` · `shared_model` 을 엔진 특성에 맞게 설정합니다
+   (`shared_model=True` 는 가중치를 프로세스 캐시로 공유할 때만. 동시 추론 보호용 lock 도 공유해야 합니다).
 3. `stt/asr/base.py` 의 `create_engine()` 과 `stt/config.py` 의 `ENGINE_CHOICES` 에 등록합니다.
 4. `server/main.py` 의 `/engines` 준비 상태 확인에 분기를 추가합니다.
 
@@ -705,9 +766,16 @@ streamlit_demo/
 
 ## 10. 테스트
 
+테스트는 두 종류로 나뉩니다.
+
+| 종류 | 실행 | 엔진 | 확인하는 것 |
+|---|---|---|---|
+| **Unit / Protocol** | `pytest tests/` (40개) | 가짜 엔진 — 모델·GPU 불필요 | 프로토콜, 순서, readiness, 설정, 자원 정리 |
+| **Real E2E** | `python -m scripts.stt_client <wav>` | 서버의 활성 엔진(기본 `funasr_mlt_nano`) | 실제 모델·GPU 추론, partial/final/timestamps/done |
+
 ```bash
 pip install pytest httpx
-pytest tests/                    # 26개
+pytest tests/
 python -m tests.test_pipeline    # pytest 없이 파이프라인 테스트만
 ```
 
@@ -715,15 +783,48 @@ python -m tests.test_pipeline    # pytest 없이 파이프라인 테스트만
 |---|---|
 | `tests/test_pipeline.py` | 병합기 중복·누락 회귀(window/overlap/지터 조합), 세션 end-to-end, 엔진별 병합 경로, WER/CER, 의료 용어 교정 |
 | `tests/test_backend_ws.py` | `/stream` 프레임 수신·순서, partial/final 형식, `close → final → done` 순서, 잘못된 프레임, 오류 메시지 비노출, 비정상 종료 시 자원 정리, `/browser` 호환, base path |
+| `tests/test_runtime.py` | liveness/readiness(LOADING→READY, 로드·warm-up 실패 시 NOT_READY), `active_engine`, preload·세션 설정 일치, 공유 모델 warm-up 생략, 로딩 중 연결, Fun-ASR 공유 lock 직렬화, 취소돼도 세션 정리 완료 |
 | `tests/test_streamlit_pages.py` | Streamlit 세 페이지가 백엔드 없이 예외 없이 렌더링되는지, 실시간 전사 페이지의 WebSocket 주소 기본값 |
 
-WebSocket 테스트는 `stt.session.create_engine` 을 가짜 엔진으로 바꿔 끼워 모델 없이 돕니다.
+Unit 테스트는 `stt.session.create_engine`(세션)과 `server.runtime.create_engine`(preload)을 가짜 엔진으로
+바꿔 끼워 모델 없이 돕니다. 실제 모델 다운로드·GPU 가 필요한 검증은 일반 `pytest` 에 넣지 않았습니다.
+
+#### Real E2E — `scripts/stt_client.py`
+
+```bash
+./start_server.sh &                                          # 서버 (다른 터미널)
+python -m scripts.stt_client recordings/sample.wav           # READY 대기 → 100 ms 실시간 전송 → close → done
+python -m scripts.stt_client sample.wav \
+  --url wss://<POD_ID>-8000.proxy.runpod.net/ws/v1/stt/stream  # RunPod 원격
+```
+
+partial/final 을 시각과 함께 출력하고, 마지막에 요약(`partials`, `finals`, `errors`, `done`)을 보여 줍니다.
+`done` 과 final 을 하나 이상 받으면 `PASS`(exit 0)입니다. 16 kHz mono 가 아닌 WAV 는 변환해서 보냅니다.
 
 ---
 
 ## 11. RunPod 배포 참고
 
 - **Pod 로 운영합니다.** 장시간 양방향 WebSocket 과 모델 상주가 필요하기 때문입니다.
+- **실행은 한 줄입니다.**
+
+  ```bash
+  cd /workspace/streamlit_demo
+  ./start_server.sh
+  ```
+
+  시작하면 `[STT] Active engine` → `Loading model...` → `Model loaded` → `Warm-up started` →
+  `Warm-up completed` → `Server READY` 로그가 차례로 나옵니다. 외부에서는
+
+  ```bash
+  curl -s https://<POD_ID>-8000.proxy.runpod.net/api/v1/stt/health/ready    # READY 확인
+  # 이후 wss://<POD_ID>-8000.proxy.runpod.net/ws/v1/stt/stream 으로 바로 연결
+  ```
+
+- **재시작·복구는 RunPod/컨테이너가 맡습니다.** 서버는 SIGTERM 에 정상 종료하고(`exec` 로 python 이
+  시그널을 직접 받음), 다시 시작하면 preload → warm-up → READY 를 반복합니다. 모델 초기화가 실패하면
+  프로세스는 살아 있되 readiness 가 `NOT_READY` 를 계속 보고하고, 원인은 `[STT] Model preload failed` 로그에 남습니다.
+  컨테이너 시작 명령을 `./start_server.sh` 로 지정해 두면 Pod 재시작 때 자동으로 올라옵니다.
 - 포트 **8000**(STT 서버), 필요하면 **8501**(Streamlit)을 HTTP 포트로 노출합니다.
   프록시 주소는 `https://<podId>-<port>.proxy.runpod.net` 이며 TLS 를 대신 처리합니다.
 - **모델을 영속 볼륨에 둡니다.** 저장소를 `/workspace` 아래에 두면 `models/` 가 재시작 후에도 남습니다.
@@ -738,7 +839,7 @@ WebSocket 테스트는 `stt.session.create_engine` 을 가짜 엔진으로 바�
 
 - uvicorn 은 **worker 1개**로 띄웁니다. 여러 개면 모델이 GPU 에 중복으로 올라가고 세션 목록이 프로세스별로 갈립니다.
   확장은 Pod 를 늘려서 합니다.
-- 헬스체크는 `/api/v1/stt/health` 를 씁니다.
+- 헬스체크: 프로세스 생존은 `/api/v1/stt/health`, 트래픽 투입 판단은 `/api/v1/stt/health/ready` 를 씁니다.
 
 ---
 
@@ -748,9 +849,9 @@ WebSocket 테스트는 `stt.session.create_engine` 을 가짜 엔진으로 바�
 |---|---|---|
 | 인증 | `/ws/v1/stt/*`, `/api/v1/stt/*` 모두 **없음** | 프록시 URL 을 알면 누구나 전사·**녹음 다운로드** 가능. 운영 전 필수 |
 | 녹음·전사 저장 | WAV 는 `save_wav` 로 끌 수 있으나 전사 JSON 은 항상 저장 | 환자 음성·대화가 서버 디스크에 남음 |
-| 모델 로드 | Whisper·Fun-ASR 은 프로세스 캐시, **sherpa 엔진은 연결마다 새로 로드** | 연결 직후 지연, 동시 접속 시 메모리 증가 |
-| readiness | `/health` 는 모델 로드 전에도 `ok` | 트래픽 투입 시점 판단 불가 |
-| 동시 접속 | 세션 수 제한 없음 | GPU 포화 시 모든 세션이 함께 느려짐 |
+| 모델 로드 | 활성 엔진은 시작 시 preload. Whisper·Fun-ASR 은 공유, **sherpa 엔진은 연결마다 새로 로드** | sherpa 엔진은 연결 직후 지연, 동시 접속 시 메모리 증가 |
+| 동시 접속 | 세션 수 제한 없음. Fun-ASR 추론은 공유 lock 으로 직렬화 | 세션이 많으면 순서 대기로 partial/final 이 늦어짐 |
+| VAD 노이즈 플로어 | 적응형 플로어가 조용한 음성(−30 dB 안팎)에 끌려 올라갈 수 있음 | 긴 녹음 후반의 음성을 무음으로 보고 건너뜀. 마이크 입력이 작으면 `vad_threshold_db` 를 낮추거나 `webrtcvad` 설치 |
 | backpressure | 입력 큐 무제한 | 추론이 실시간보다 느리면 지연이 계속 늘어남 |
 | 재연결 | 이어 받기 없음 | 끊기면 진행 중 발화 유실, 시각 0 부터 재시작 |
 | 화자 분리 | 범위 밖 | 의료진·환자가 한 마이크를 공유 |
@@ -768,4 +869,5 @@ WebSocket 테스트는 `stt.session.create_engine` 을 가짜 엔진으로 바�
 | Zipformer / SenseVoice / Fun-ASR-MLT-Nano 엔진 | 완료 |
 | 의료 데이터셋 50건 비교 평가 | 완료 (`dataset/`) |
 | External Backend API (`/ws/v1/stt/stream`) | 완료 · 통합 테스트 |
-| 인증 · 동시 접속 제한 · 엔진 사전 로드 | 예정 |
+| 엔진 사전 로드 · liveness/readiness 분리 · `start_server.sh` | 완료 · 테스트 |
+| 인증 · 동시 접속 제한 | 예정 |

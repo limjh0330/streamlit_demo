@@ -28,6 +28,9 @@ _HINT = (
 
 _MODEL_CACHE: dict[str, object] = {}
 _CACHE_LOCK = threading.Lock()
+#: 모델(장치)별 추론 lock. 세션마다 엔진 인스턴스는 따로지만 모델은 하나이므로,
+#: `AutoModel.generate()` 동시 호출을 막으려면 lock 도 모델 단위로 공유해야 한다.
+_INFER_LOCKS: dict[str, threading.Lock] = {}
 
 # 모델 카드의 언어명 API와 기존 UI의 ISO 언어 코드를 모두 지원한다.
 _LANGUAGE_NAMES = {
@@ -63,7 +66,19 @@ def load_model(device: str):
             if model == MODEL_ID:
                 kwargs["hub"] = "hf"
             _MODEL_CACHE[resolved] = AutoModel(**kwargs)
+            _INFER_LOCKS[resolved] = threading.Lock()
         return _MODEL_CACHE[resolved]
+
+
+def inference_lock(device: str) -> threading.Lock:
+    """`load_model(device)` 로 올린 모델을 쓰는 모든 세션이 공유하는 추론 lock."""
+    resolved = _funasr_device(device)
+    with _CACHE_LOCK:
+        return _INFER_LOCKS.setdefault(resolved, threading.Lock())
+
+
+def is_loaded(device: str) -> bool:
+    return _funasr_device(device) in _MODEL_CACHE
 
 
 class FunASRMLTNanoEngine(ASREngine):
@@ -71,11 +86,13 @@ class FunASRMLTNanoEngine(ASREngine):
     native_streaming = False
     has_word_timestamps = False
     decodes_full_utterance = True
+    shared_model = True
 
     def __init__(self, config: StreamConfig) -> None:
         super().__init__(config)
         self.model = load_model(config.device)
-        self._lock = threading.Lock()
+        # 세션 간 공유: 동시 세션의 추론은 이 lock 으로 한 번에 하나씩 돈다
+        self._lock = inference_lock(config.device)
 
     def transcribe(
         self, audio: np.ndarray, t0: float = 0.0, is_final: bool = False

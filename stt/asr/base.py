@@ -54,6 +54,9 @@ class ASREngine(ABC):
     #: SenseVoice 처럼 non-autoregressive 하고 빠른 엔진에 맞는 방식으로,
     #: 겹침 제거가 필요 없어지고 잘린 오디오를 인식할 때의 오류도 사라진다.
     decodes_full_utterance: bool = False
+    #: True 면 가중치를 프로세스 전역 캐시에서 공유한다(인스턴스를 새로 만들어도
+    #: 모델을 다시 올리지 않는다). 서버는 preload 해 둔 이런 엔진의 세션별 warm-up 을 건너뛴다.
+    shared_model: bool = False
 
     def __init__(self, config: StreamConfig) -> None:
         self.config = config
@@ -79,8 +82,12 @@ class ASREngine(ABC):
         pass
 
     # --- 공통 -------------------------------------------------------------
-    def warmup(self) -> float:
-        """모델 첫 추론 지연을 미리 소진. 소요 시간(초) 반환."""
+    def warmup(self, strict: bool = False) -> float:
+        """모델 첫 추론 지연을 미리 소진. 소요 시간(초) 반환.
+
+        `strict=False`(기본)면 실패를 삼킨다(세션은 계속 연다). 서버 preload 는
+        `strict=True` 로 불러 추론이 실제로 되는지까지 확인한다.
+        """
         t = time.perf_counter()
         silence = np.zeros(int(self.sample_rate * 0.5), dtype=np.float32)
         try:
@@ -91,7 +98,8 @@ class ASREngine(ABC):
             else:
                 self.transcribe(silence)
         except Exception:
-            pass
+            if strict:
+                raise
         return time.perf_counter() - t
 
     def close(self) -> None:

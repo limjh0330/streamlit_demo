@@ -1,9 +1,10 @@
-"""External Backend 용 `/ws/v1/stt/stream` 어댑터를 가짜 엔진으로 검증한다.
+"""[Unit / Protocol test] `/ws/v1/stt/stream` 어댑터를 가짜 엔진으로 검증한다.
 
     pytest tests/test_backend_ws.py
 
-실제 모델 대신 `stt.session.create_engine` 을 결정적 엔진으로 바꿔 끼운다.
-세션/VAD/버퍼/병합기는 실제 코드가 그대로 돈다.
+실제 모델 대신 `stt.session.create_engine`(세션)과 `server.runtime.create_engine`
+(서버 시작 시 preload)을 결정적 엔진으로 바꿔 끼운다. 세션/VAD/버퍼/병합기는
+실제 코드가 그대로 돈다. 실제 Fun-ASR 추론 검증은 `scripts/stt_client.py` (Real E2E).
 """
 from __future__ import annotations
 
@@ -15,6 +16,7 @@ import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
+import server.runtime as runtime_module
 import server.websocket as ws_module
 import stt.session as session_module
 from server.backend_ws import FRAME_BYTES, MAX_FRAME_BYTES
@@ -67,6 +69,7 @@ def stt(monkeypatch, tmp_path):
         "STT_CONFIG", json.dumps({"save_wav": True, "medical_correction": False})
     )
     monkeypatch.setattr(session_module, "create_engine", lambda cfg: ScriptedEngine(cfg))
+    monkeypatch.setattr(runtime_module, "create_engine", lambda cfg: ScriptedEngine(cfg))
     monkeypatch.setattr(ws_module, "TRANSCRIPTS_DIR", tmp_path / "transcripts")
     monkeypatch.setattr(
         session_module, "WavRecorder", lambda sid: WavRecorder(sid, directory=tmp_path)
@@ -161,8 +164,10 @@ def test_final_transcript_format(stt) -> None:
 
 
 def test_timestamps_can_be_disabled(stt, monkeypatch) -> None:
+    # STT_TIMESTAMPS 는 서버 시작 시 한 번 읽는다 → 바꾼 뒤 서버를 새로 띄운다
     monkeypatch.setenv("STT_TIMESTAMPS", "0")
-    messages = _run_utterance(stt["client"], _utterance_frames())
+    with TestClient(app) as client:
+        messages = _run_utterance(client, _utterance_frames())
     final = next(m for m in messages if m.get("is_final"))
     assert set(final) == {"type", "text", "is_final"}
 
@@ -274,7 +279,7 @@ def test_endpoints_live_under_versioned_base_paths(stt) -> None:
     assert (API_BASE, WS_STREAM_PATH, WS_BROWSER_PATH) == (
         "/api/v1/stt", "/ws/v1/stt/stream", "/ws/v1/stt/browser"
     )
-    assert client.get(f"{API_BASE}/health").json()["status"] == "ok"
+    assert client.get(f"{API_BASE}/health").json()["status"] == "OK"
     assert "engines" in client.get(f"{API_BASE}/engines").json()
     assert set(client.get(f"{API_BASE}/sessions").json()) == {"active", "saved"}
     assert client.get(f"{API_BASE}/sessions/nope/transcript").status_code == 404
