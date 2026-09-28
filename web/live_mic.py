@@ -13,6 +13,8 @@ from pathlib import Path
 
 import streamlit as st
 
+from stt.config import WS_BROWSER_PATH
+
 _DIR = Path(__file__).resolve().parent
 
 #: 컴포넌트 등록은 import 시 한 번만. 마운트 함수 안에서 등록하면 재등록된다.
@@ -49,6 +51,7 @@ def live_mic(
         key=key,
         data={
             "ws_url": ws_url,
+            "ws_path": WS_BROWSER_PATH,
             "backend_port": backend_port,
             "chunk_ms": chunk_ms,
             "engine": engine,

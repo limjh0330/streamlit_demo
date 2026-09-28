@@ -16,11 +16,13 @@ import urllib.request
 import streamlit as st
 
 from stt.config import (
+    API_BASE,
     API_URL,
     BACKEND_PORT,
     CHUNK_MS_CHOICES,
     ENGINE_CHOICES,
     WHISPER_SIZES,
+    WS_BROWSER_PATH,
     WS_URL,
     StreamConfig,
 )
@@ -38,7 +40,7 @@ st.caption(
 @st.cache_data(ttl="30s", show_spinner=False)
 def backend_engines(api_url: str) -> dict:
     """백엔드에 설치·준비된 엔진을 물어본다. 같은 인스턴스이므로 localhost."""
-    with urllib.request.urlopen(f"{api_url}/api/engines", timeout=3) as r:
+    with urllib.request.urlopen(f"{api_url}{API_BASE}/engines", timeout=3) as r:
         return json.load(r)
 
 
@@ -50,10 +52,11 @@ with st.sidebar:
     api_url = st.text_input("REST 주소 (Python → 백엔드)", API_URL)
     ws_url = st.text_input(
         "WebSocket 주소 (브라우저 → 백엔드)",
-        WS_URL,
+        WS_BROWSER_PATH,
+    WS_URL,
         placeholder=f"비우면 주소창에서 유도 (포트 {BACKEND_PORT})",
         help="RunPod 은 포트마다 호스트가 달라 자동 유도합니다. "
-        "다르게 노출했다면 wss://… /ws 를 직접 적으세요.",
+        f"다르게 노출했다면 wss://…{WS_BROWSER_PATH} 를 직접 적으세요.",
     )
 
     try:

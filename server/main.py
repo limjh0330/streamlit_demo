@@ -2,9 +2,9 @@
 
     python -m server.main --host 0.0.0.0 --port 8000
 
-브라우저는 `/ws` 로 PCM16 오디오를 밀어넣고 partial/final 전사를 받는다.
-External Backend 는 `/ws/stt` 로 붙는다(규격은 `server/backend_ws.py`).
-Streamlit 은 `/api/*` 로 상태만 조회한다(같은 인스턴스이므로 localhost).
+External Backend 는 `/ws/v1/stt/stream` 으로 붙는다(규격은 `server/backend_ws.py`).
+브라우저는 `/ws/v1/stt/browser` 로 PCM16 오디오를 밀어넣고 partial/final 전사를 받는다.
+Streamlit 은 `/api/v1/stt/*` 로 상태만 조회한다(같은 인스턴스이므로 localhost).
 
 RunPod 프록시가 TLS 를 끝내주므로 여기서는 평문 HTTP 로 띄우면 된다.
 """
@@ -14,15 +14,17 @@ import argparse
 import json
 import logging
 
-from fastapi import FastAPI, HTTPException, WebSocket
+from fastapi import APIRouter, FastAPI, HTTPException, WebSocket
 from fastapi.responses import FileResponse, JSONResponse
 
 from stt.config import (
+    API_BASE,
     ENGINE_CHOICES,
     RECORDINGS_DIR,
     SAMPLE_RATE,
     TRANSCRIPTS_DIR,
     WHISPER_SIZES,
+    WS_BASE,
     StreamConfig,
 )
 from stt.metrics.latency import gpu_memory_mb
@@ -35,20 +37,21 @@ logging.basicConfig(
 )
 
 app = FastAPI(title="ER STT Backend", version="2.0")
+api = APIRouter(prefix=API_BASE)     # /api/v1/stt/*
+ws_api = APIRouter(prefix=WS_BASE)   # /ws/v1/stt/*
 
 
-@app.websocket("/ws")
-async def websocket_route(ws: WebSocket) -> None:
-    await stt_endpoint(ws)
-
-
-@app.websocket("/ws/stt")
+@ws_api.websocket("/stream")
 async def backend_websocket_route(ws: WebSocket) -> None:
     await backend_stt_endpoint(ws)
 
 
-@app.get("/")
-@app.get("/api/health")
+@ws_api.websocket("/browser")
+async def websocket_route(ws: WebSocket) -> None:
+    await stt_endpoint(ws)
+
+
+@api.get("/health")
 async def health() -> dict:
     return {
         "status": "ok",
@@ -58,7 +61,7 @@ async def health() -> dict:
     }
 
 
-@app.get("/api/engines")
+@api.get("/engines")
 async def engines() -> dict:
     """설치/모델 준비 상태까지 확인해서 선택 가능한 엔진을 알려준다."""
     available = {}
@@ -95,7 +98,7 @@ async def engines() -> dict:
     }
 
 
-@app.get("/api/sessions/{session_id}/transcript")
+@api.get("/sessions/{session_id}/transcript")
 async def transcript(session_id: str) -> JSONResponse:
     path = TRANSCRIPTS_DIR / f"{session_id}.json"
     if not path.exists():
@@ -103,7 +106,7 @@ async def transcript(session_id: str) -> JSONResponse:
     return JSONResponse(json.loads(path.read_text(encoding="utf-8")))
 
 
-@app.get("/api/sessions/{session_id}/audio")
+@api.get("/sessions/{session_id}/audio")
 async def audio(session_id: str) -> FileResponse:
     path = RECORDINGS_DIR / f"{session_id}.wav"
     if not path.exists():
@@ -111,12 +114,16 @@ async def audio(session_id: str) -> FileResponse:
     return FileResponse(path, media_type="audio/wav", filename=path.name)
 
 
-@app.get("/api/sessions")
+@api.get("/sessions")
 async def sessions() -> dict:
     saved = sorted(
         (p.stem for p in TRANSCRIPTS_DIR.glob("*.json")), reverse=True
     )
     return {"active": list(SESSIONS), "saved": saved[:50]}
+
+
+app.include_router(api)
+app.include_router(ws_api)
 
 
 def main() -> None:

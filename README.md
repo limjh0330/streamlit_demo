@@ -1,58 +1,78 @@
-# streamlit_demo
 # ER 실시간 음성 전사 (STT)
 
-응급실 진료 대화를 실시간으로 전사하는 시스템입니다.
-**수음은 브라우저, 추론은 RunPod** 에서 합니다. 클라이언트에는 아무것도 설치하지 않습니다.
+응급실 예진 대화를 **실시간으로 한국어 전사**하는 STT 서버입니다.
+RunPod GPU 인스턴스에서 모델을 띄우고, 외부 Backend 나 브라우저가 WebSocket 으로
+PCM 오디오를 보내면 partial / final 전사를 실시간으로 돌려줍니다.
 
-```
-┌──────────── Mac / Client ─────────────┐
-│                                       │
-│ Microphone                            │
-│      ↓ getUserMedia()                 │
-│ Browser                               │
-│      ↓ AudioWorklet (PCM16 / 16 kHz)  │
-│ Streamlit audio_input / WebSocket     │
-└────────────────┬──────────────────────┘
-                 │  100~500 ms audio chunk
-                 ↓
-┌──────────── RunPod ───────────────────┐
-│                                       │
-│ Streamlit (8501) / Backend (8000)     │
-│       ↓                               │
-│ STT model (streaming ASR)             │
-│       ↓                               │
-│ Korean transcript (partial → final)   │
-└────────────────┬──────────────────────┘
-                 │  JSON partial / final
-                 ↓
-              Browser
-```
+- **4개 ASR 엔진**을 같은 인터페이스로 지원합니다 — Whisper · Zipformer · SenseVoice · Fun-ASR-MLT-Nano
+- 엔진이 달라도 **API 규격은 동일**합니다. 엔진은 서버 설정으로만 바꿉니다.
+- 연구·비교용 **Streamlit UI**(실시간 전사 / 파일 전사 / 성능 비교)가 함께 들어 있습니다.
 
-| 경로 | 브라우저가 하는 일 | RunPod 이 하는 일 |
-|---|---|---|
-| **실시간 전사** | getUserMedia → AudioWorklet → WebSocket 으로 청크 전송 | streaming ASR → partial/final 을 WS 로 회신 |
-| **파일 전사** | `st.audio_input` / 파일 업로드 | 전체 오디오를 한 번에 전사 |
+## 목차
 
-ASR 백엔드는 어댑터로 분리되어 있어 같은 오디오로 네 엔진을 비교할 수 있습니다.
-모두 한국어를 지원하며, 엔진마다 오디오를 넣는 방식이 다릅니다.
-
-| 엔진 | 패키지 | 오디오 공급 방식 | 특징 |
-|---|---|---|---|
-| **Whisper** | `faster-whisper` | 5 s sliding window + 1.5 s overlap | 정확도 baseline. autoregressive 라 느림 |
-| **Zipformer** | `sherpa-onnx` | 프레임 단위 `accept_waveform` | 진짜 streaming. 내장 endpoint 검출, 첫 partial 이 가장 빠름 |
-| **SenseVoice** | `sherpa-onnx` | 발화 전체를 0.8 s 마다 재인식 | non-autoregressive. RTF 0.02 로 매우 빠름 |
-| **Fun-ASR-MLT-Nano-2512** | `funasr` | 발화 전체를 0.8 s 마다 재인식 | 800M·31개 언어 다국어 ASR. 현재 타임스탬프 미지원 |
-
-SenseVoice 는 추론이 워낙 빨라 윈도우를 잘라 넣는 대신 **발화 전체를 매번 다시
-인식**합니다(`decodes_full_utterance`). 잘린 오디오를 인식할 때 생기는 오류와
-윈도우 간 중복이 함께 사라집니다.
+1. [시스템 개요](#1-시스템-개요)
+2. [빠른 시작](#2-빠른-시작)
+3. [지원 STT 모델](#3-지원-stt-모델)
+4. [파이프라인 구조](#4-파이프라인-구조)
+5. [STT API](#5-stt-api)
+6. [설정](#6-설정)
+7. [Streamlit UI](#7-streamlit-ui)
+8. [평가와 벤치마크](#8-평가와-벤치마크)
+9. [프로젝트 구조](#9-프로젝트-구조)
+10. [테스트](#10-테스트)
+11. [RunPod 배포 참고](#11-runpod-배포-참고)
+12. [현재 제약과 남은 과제](#12-현재-제약과-남은-과제)
 
 ---
 
-## 1. 설치
+## 1. 시스템 개요
 
-anaconda base 환경에는 NumPy 1.x 로 빌드된 패키지가 섞여 있어 충돌이 납니다.
-**프로젝트 전용 가상환경**을 권장합니다.
+```
+┌──────── Client ────────┐        ┌──────── External Backend ────────┐
+│ Browser (Streamlit UI) │        │ 예진 세션 · turn · DB · LLM · KTAS │
+│ getUserMedia           │        └───────────────┬──────────────────┘
+│ → AudioWorklet (PCM16) │                        │ PCM16 16 kHz mono, 100 ms
+└───────────┬────────────┘                        │ WS /ws/v1/stt/stream
+            │ WS /ws/v1/stt/browser               │
+            ▼                                     ▼
+┌──────────────────────── RunPod ───────────────────────────────────┐
+│  Streamlit :8501            STT server (FastAPI) :8000            │
+│                               │                                   │
+│                     StreamingSession (연결 1개 = 세션 1개)         │
+│                     VAD/endpoint → ASR Engine → TranscriptMerger  │
+│                               │                                   │
+│                     transcript (partial / final)                  │
+└───────────────────────────────┬───────────────────────────────────┘
+                                ▼
+                  Backend / Browser 로 JSON 회신
+```
+
+### 책임 범위
+
+| STT 서버가 하는 일 | STT 서버가 **하지 않는** 일 (Backend 책임) |
+|---|---|
+| PCM 오디오 수신 · 검증 | conversation / turn 번호 관리 |
+| VAD · 발화 끝(endpoint) 판정 | 화자 구분, 환자·의료진 역할 추정 |
+| ASR 추론 · partial / final 전사 | KTAS · Major/Minor 분류 |
+| 의료 용어 후처리 | LLM 호출 |
+| WAV 녹음 · 지연/RTF 지표 기록 | DB 저장 |
+
+### 두 개의 WebSocket
+
+| 경로 | 쓰는 쪽 | 특징 |
+|---|---|---|
+| `/ws/v1/stt/stream` | **External Backend** | 오디오와 `close` 만 보낸다. 엔진 설정은 서버가 정한다 |
+| `/ws/v1/stt/browser` | Streamlit 실시간 전사 페이지 | `start` 메시지로 엔진·윈도우를 직접 고른다(실험용) |
+
+두 경로는 입출력 형식만 다르고 뒤의 `StreamingSession` 파이프라인은 같습니다.
+
+---
+
+## 2. 빠른 시작
+
+### 2.1 설치
+
+anaconda base 환경은 NumPy 1.x 로 빌드된 패키지와 충돌하므로 **전용 가상환경**을 씁니다.
 
 ```bash
 python3 -m venv .venv
@@ -60,495 +80,335 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Whisper 모델은 최초 실행 시 자동으로 받습니다. Zipformer / SenseVoice 는
-모델 파일을 먼저 내려받아야 합니다.
+### 2.2 모델 준비
 
 ```bash
-python -m scripts.fetch_models        # 약 360 MB (int8)
+python -m scripts.fetch_models                    # zipformer + sensevoice (int8) + funasr_mlt_nano
+python -m scripts.fetch_models sensevoice         # 하나만
+python -m scripts.fetch_models --keep all --force # fp32 까지 (GPU 권장)
 ```
 
-Fun-ASR-MLT-Nano-2512는 `funasr>=1.4.1` 설치 후 첫 전사 때 Hugging Face
-캐시에 자동으로 내려받습니다. 모델이 약 800M 파라미터이므로 GPU 실행을 권장합니다.
+Whisper 는 첫 실행 때 Hugging Face 캐시(`~/.cache/huggingface`)로 자동 다운로드됩니다.
+모델별 위치와 용량은 [3.1](#31-한눈에-보기) 을 보세요.
 
-| 디렉터리 | 릴리스 |
-|---|---|
-| `models/zipformer/` | `sherpa-onnx-streaming-zipformer-korean-2024-06-16` (한국어 전용) |
-| `models/sensevoice/` | `sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17` (한국어 포함 다국어) |
-
-RunPod GPU 에서는 sherpa-onnx 도 CUDA 휠로 바꾸고 fp32 가중치를 받으세요.
-CPU 휠에 `provider="cuda"` 를 주면 경고만 내고 CPU 로 떨어집니다.
+### 2.3 실행
 
 ```bash
-pip install sherpa-onnx -f https://k2-fsa.github.io/sherpa/onnx/cuda.html
-python -m scripts.fetch_models --keep all --force
-```
+# STT 서버 (API) — 엔진은 환경변수로 선택
+STT_ENGINE=sensevoice python -m server.main --host 0.0.0.0 --port 8000
 
-## 2. 실행
-
-RunPod 인스턴스에서 **두 프로세스**를 띄웁니다. 포트 8501(Streamlit)과
-8000(STT 백엔드)을 모두 노출해 두세요.
-
-```bash
-# 1) STT 백엔드 — 브라우저 오디오를 받는 WebSocket 서버
-python -m server.main --host 0.0.0.0 --port 8000
-
-# 2) Streamlit UI
+# Streamlit UI (선택)
 streamlit run streamlit_app.py --server.port 8501 --server.address 0.0.0.0
 ```
 
-Mac 에서는 RunPod 이 준 Streamlit 주소만 열면 됩니다.
-
-| 페이지 | 하는 일 |
-|---|---|
-| 실시간 전사 | 브라우저 마이크 → WebSocket → streaming ASR → partial/final, 라이브 지표 |
-| 파일 전사 | `st.audio_input`·업로드 파일을 통째로 전사. 정답(reference) 만들기용 |
-| 성능 비교 | 저장된 세션의 RTF/지연/WER/CER/의료용어 recall 비교 |
-
-### 백엔드 주소
-
-브라우저는 Streamlit(8501)과 **다른 호스트**의 백엔드(8000)로 오디오를 보냅니다.
-RunPod 은 포트마다 호스트를 따로 주므로(`<podId>-<port>.proxy.runpod.net`)
-기본값은 주소창에서 자동으로 유도합니다. 다르게 노출했다면 환경변수나
-사이드바에서 직접 지정하세요.
-
-| 환경변수 | 기본값 | 쓰는 쪽 |
-|---|---|---|
-| `STT_BACKEND_PORT` | `8000` | 주소 유도에 쓰는 백엔드 포트 |
-| `STT_API_URL` | `http://127.0.0.1:8000` | Python → 백엔드 (상태 조회, 같은 인스턴스) |
-| `STT_WS_URL` | (비움 → 자동 유도) | 브라우저 → 백엔드 (오디오 스트림) |
-
-브라우저는 **HTTPS 또는 localhost** 에서만 마이크를 엽니다. RunPod 프록시는
-HTTPS 라 그대로 되고, 로컬 개발은 `localhost` 라 그대로 됩니다.
-
-### 로컬에서 돌려보기
+### 2.4 동작 확인
 
 ```bash
-python -m server.main --host 127.0.0.1 --port 8000
-streamlit run streamlit_app.py --server.port 8501
-# http://localhost:8501
+curl http://localhost:8000/api/v1/stt/health
+# {"status":"ok","sample_rate":16000,"active_sessions":[],"gpu_memory_mb":null}
+
+curl http://localhost:8000/api/v1/stt/engines     # 엔진별 준비 상태
 ```
 
-### 엔진 비교 (CLI)
-
-Streamlit 없이 같은 오디오를 네 엔진에 통과시켜 지표를 뽑습니다. 결과는
-`transcripts/` 에 저장되어 **성능 비교** 페이지에 그대로 나타납니다.
-
-```bash
-python -m scripts.benchmark recordings/sample.wav --realtime --reference ref.txt
-```
-
-`--realtime` 은 오디오를 실제 속도로 흘려 넣습니다. **지연 지표(first partial /
-final latency)는 이때만 의미가 있습니다** — 한 번에 밀어 넣으면 큐에 쌓인 채로
-측정돼 실제보다 훨씬 작게 나옵니다.
-
-### 테스트
-
-```bash
-python -m tests.test_pipeline     # pytest 없이도 실행됨
-pytest tests/
-```
+오디오를 실제로 보내 보려면 [5.4 클라이언트 예제](#54-클라이언트-예제) 를 실행하세요.
 
 ---
 
-## 3. 구조
+## 3. 지원 STT 모델
 
-```
-streamlit_demo/
-├── streamlit_app.py          # Streamlit 진입점 (st.navigation)
-├── app_pages/
-│   ├── realtime.py           # 브라우저 마이크 실시간 전사
-│   ├── file_stt.py           # audio_input / 업로드 파일 전사
-│   └── metrics.py            # 엔진 성능 비교
-│
-├── web/                      # ── 브라우저에서 도는 코드 ──
-│   ├── live_mic.py           # CCv2 컴포넌트 등록 + Python 래퍼
-│   ├── live_mic.html         # 컴포넌트 마크업
-│   ├── live_mic.css          # Streamlit 테마 토큰(--st-*) 기반 스타일
-│   └── live_mic.js           # getUserMedia → AudioWorklet → WebSocket
-│
-├── stt/                      # ── 공용 코어 (백엔드·Streamlit 공유) ──
-│   ├── config.py             # 오디오 규격 + 백엔드 주소 + StreamConfig
-│   ├── session.py            # Session Manager (파이프라인 전체)
-│   ├── audio/
-│   │   ├── buffer.py         # sliding window + overlap
-│   │   ├── recorder.py       # raw WAV 실시간 저장
-│   │   ├── resampler.py      # PCM16 ↔ float32, 리샘플
-│   │   └── vad.py            # 에너지 VAD + endpoint 검출
-│   ├── asr/
-│   │   ├── base.py           # ASREngine 인터페이스 + 팩토리
-│   │   ├── whisper.py        # faster-whisper
-│   │   ├── zipformer.py      # sherpa-onnx streaming
-│   │   ├── sensevoice.py     # sherpa-onnx offline
-│   │   └── funasr_mlt_nano.py # Fun-ASR-MLT-Nano-2512 (FunASR)
-│   ├── transcript/
-│   │   ├── merger.py         # stable prefix / unstable suffix / overlap dedup
-│   │   └── medical_terms.py  # ER 용어 사전 + 후처리
-│   └── metrics/
-│       ├── latency.py        # RTF, first partial, final latency, CPU/메모리
-│       └── evaluator.py      # WER / CER / 의료용어 recall
-│
-├── server/
-│   ├── main.py               # FastAPI 앱 + REST (상태 조회)
-│   ├── websocket.py          # /ws 엔드포인트 (브라우저) + 세션 공용 헬퍼
-│   └── backend_ws.py         # /ws/stt 엔드포인트 (External Backend 어댑터)
-│
-├── scripts/
-│   ├── fetch_models.py       # Zipformer / SenseVoice 모델 다운로드
-│   └── benchmark.py          # 같은 오디오로 엔진 비교 (CLI)
-│
-├── recordings/               # 세션별 원본 WAV
-├── transcripts/              # 세션별 전사 결과 (.txt / .json)
-└── models/                   # sherpa-onnx 모델
-```
+### 3.1 한눈에 보기
 
-### 마이크 캡처가 Streamlit 안에서 도는 이유
-
-Streamlit Custom Component **v2** 는 iframe 이 아니라 앱 문서 안에서 실행됩니다.
-따라서 마이크 권한을 iframe 으로 위임할 필요 없이 `getUserMedia()`,
-`AudioWorklet`, `WebSocket` 을 그대로 쓸 수 있습니다. AudioWorklet 은 URL 로만
-로드되므로 워클릿 소스를 Blob URL 로 만들어 넘깁니다(`web/live_mic.js`).
-
-부분 전사는 초당 여러 번 갱신되므로 Python 으로 올리지 않고 브라우저에서 직접
-그립니다. 세션이 끝날 때만 `setStateValue("result", …)` 로 요약을 한 번 올려
-리런을 1회로 억제합니다.
-
----
-
-## 4. 파이프라인
-
-```
-브라우저 마이크 (getUserMedia → AudioWorklet)
-   ↓ PCM16 16 kHz mono, 100~500 ms chunk over WebSocket
-StreamingSession.feed()          ← 논블로킹 (WS 핸들러에서 호출)
-   ↓ Queue
-워커 스레드
-   ├→ WavRecorder                → recordings/<session>.wav
-   ├→ EndpointDetector (VAD)     → 발화 시작 / 종료 판정
-   ├→ SlidingWindowBuffer        → 5 s window, 1.5 s overlap
-   ↓
-ASREngine.transcribe(audio, t0)  → 절대 시각이 붙은 단어열
-   ↓
-TranscriptMerger                 → stable(확정) + unstable(부분)
-   ↓
-Event(partial / final / metrics) → WebSocket JSON → 브라우저 화면
-```
-
-### 중복 단어 제거 (핵심)
-
-윈도우가 겹치므로 같은 단어가 여러 번 나옵니다. `TranscriptMerger` 는 3중으로 거릅니다.
-
-1. **시각 기준** — 확정 시각 이전의 단어는 버린다.
-2. **텍스트 기준** — 확정된 꼬리와 새 가설의 머리가 겹치면 잘라낸다
-   (타임스탬프가 윈도우마다 수십 ms 흔들리므로 1) 만으로는 부족).
-3. **LocalAgreement-2** — 두 번 연속 같게 나온 접두사만 확정하고,
-   나머지 꼬리는 `unstable` 로 두어 다음 윈도우에서 다시 판단한다.
-
-윈도우 경계에 걸쳐 다음 가설이 이어받지 못하는 단어는 **버리지 않고 그 시점에 확정**합니다.
-이 부분이 누락·중복의 주된 원인이라 `tests/test_pipeline.py` 에서
-window/overlap/지터 조합을 훑는 회귀 테스트로 고정해 두었습니다.
-
-### 엔진별 병합 경로
-
-엔진이 주는 정보가 달라서 병합 전략도 셋으로 갈립니다.
-
-| 엔진 | 병합기 진입점 | 이유 |
-|---|---|---|
-| Whisper, Zipformer | `update(words)` | 단어 타임스탬프가 있어 시각 기준 정렬이 가능 |
-| SenseVoice, Fun-ASR-MLT-Nano | `replace_text(text)` | 매번 발화 전체를 다시 인식하므로 최신 가설로 교체 |
-| (타임스탬프 없는 윈도우형) | `update_text(text)` | 텍스트 겹침만 제거하고 한 윈도우 늦게 확정 |
-
-여기서 걸렸던 것들 — 모두 회귀 테스트로 고정했습니다.
-
-- **네이티브 스트리밍 엔진은 같은 가설을 반복해서 준다.** Zipformer 는 100 ms
-  블록마다 결과를 주는데 대부분 직전과 같습니다. 그대로 병합기에 넣으면
-  LocalAgreement-2 의 "두 번 연속 같았다" 가 저절로 성립해, 아직 자라는 중인
-  어절이 확정돼 버립니다("척" 확정 → 다음 블록에서 "척할려고" 가 또 확정 →
-  `척 척할려고`). **가설이 실제로 바뀌었을 때만** 넘깁니다.
-- **BPE 토큰을 그대로 이으면 띄어쓰기가 사라진다.** sherpa-onnx 의
-  `get_result()` 는 공백이 지워진 문자열을 줍니다(`걔는괜찮은척하려구`).
-  `get_result_all()` 로 토큰열을 받아 선행 공백(= `▁`)을 어절 경계로 삼아
-  다시 묶습니다.
-- **endpoint 직후에는 마지막 어절이 잘린다.** 디코더 안에 토큰이 남아 있어
-  "같았다" 가 "같았" 로 끝납니다. 0.3 s 무음을 흘려 넣어 끌어냅니다.
-- **발화 전체를 재인식하는 엔진에 겹침 제거를 쓰면 중복된다.** 잘린 오디오의
-  부정확한 인식("괜찮찮은 척 하려")이 뒤의 정확한 인식과 텍스트가 달라
-  `_strip_overlap` 을 빠져나옵니다. 교체 경로(`replace_text`)로 분리했습니다.
-
----
-
-## 5. 지표
-
-| 지표 | 위치 | 의미 |
-|---|---|---|
-| RTF | `metrics/latency.py` | 추론시간 / 오디오길이. **1.0 미만**이어야 실시간 |
-| First partial latency | 〃 | 발화 시작 → 첫 부분 전사 |
-| Final transcript latency | 〃 | endpoint → 발화 확정 |
-| Partial revision rate | `transcript/merger.py` | 부분 전사가 뒤집힌 비율 |
-| CPU / 메모리 / GPU | `metrics/latency.py` | psutil, torch |
-| WER / CER | `metrics/evaluator.py` | 한국어는 CER 이 더 신뢰할 만함 |
-| 의료용어 recall | 〃 | 정답 속 도메인 용어를 얼마나 살렸는지 |
-
-### 실측 (Apple Silicon 로컬, CPU int8, 5.4 s 한국어 발화, window 5 s / overlap 1.5 s)
-
-| 모델 | RTF | 첫 partial | final 지연 | 전사 |
-|---|---|---|---|---|
-| tiny | 0.10 | 1.75 s | 0.14 s | 오늘 아침부터 **개가** … (오인식) |
-| base | 0.24 | 4.19 s → 2.1 s | 0.71 s | 환각 문장 삽입("고맙습니다") |
-| small | 0.44 | 2.66 s | 0.72 s | 정답과 일치 |
-
-CPU 에서는 `small` 까지가 실시간(RTF < 1)입니다. `medium` 이상은 GPU 를 쓰세요.
-RunPod GPU 인스턴스에서는 `stt/config.py` 의 `default_device()` 가 CUDA 를 감지해
-`device=cuda` / `compute_type=float16` 을 자동으로 고릅니다.
-
-첫 partial 지연은 `first_hop_sec`(기본 1.5 s)로 조절합니다. 발화 시작 직후
-첫 윈도우만 짧게 끊어 내보내고, 이후에는 `window - overlap`(=3.5 s) 간격으로
-갱신합니다. 값을 줄이면 반응이 빨라지지만 추론 횟수와 CPU 사용이 늘어납니다.
-
-### 엔진 비교 (Apple Silicon CPU, 6.9 s 한국어 진료 발화, `--realtime`)
-
-`python -m scripts.benchmark recordings/... --realtime --reference ref.txt`
-
-| 엔진 | RTF | 첫 partial | final 지연 | WER | CER | 의료용어 recall |
+| `STT_ENGINE` | 모델 | 패키지 | 모델 위치 | 입력 방식 | 단어 타임스탬프 | 권장 장치 |
 |---|---|---|---|---|---|---|
-| Whisper `small` | 0.45 | 2638 ms | 783 ms | **0.00** | **0.00** | 1.00 |
-| Zipformer (streaming) | **0.06** | **537 ms** | 17 ms | 0.73 | 0.40 | 0.00 |
-| SenseVoice | 0.03 | 973 ms | 64 ms | 0.18 | 0.03 | 1.00 |
+| `whisper` | faster-whisper `tiny`~`large-v3` (기본 `small`) | `faster-whisper` | HF 캐시 (자동 다운로드) | sliding window 5 s / overlap 1.5 s | 있음 | CPU(small 까지) / GPU |
+| `zipformer` | sherpa-onnx streaming zipformer korean 2024-06-16 | `sherpa-onnx` | `models/zipformer/` (127 MB, int8) | 100 ms 블록 native streaming | 있음 (토큰 기반) | CPU |
+| `sensevoice` | sherpa-onnx SenseVoice zh-en-ja-ko-yue 2024-07-17 | `sherpa-onnx` | `models/sensevoice/` (229 MB, int8) | 발화 전체를 0.8 s 마다 재인식 | 없음 (균등 분할 추정) | CPU / GPU |
+| `funasr_mlt_nano` | FunAudioLLM/Fun-ASR-MLT-Nano-2512 | `funasr`, `torch` | `models/funasr_mlt_nano/` (1.9 GB) | 발화 전체를 **5 s** 마다 재인식 | 없음 | **GPU** |
 
-- **Zipformer** 는 첫 partial 이 Whisper 의 1/5 로 압도적으로 빠릅니다. 다만 받아
-  쓴 모델은 일상 대화(KsponSpeech) 로 학습된 것이라 의료 용어에서 많이 틀립니다
-  ("배가 아팠습니다" → "걔가 했습니다"). 의료 도메인에 쓰려면 fine-tuning 이 필요합니다.
-- **SenseVoice** 가 지연·정확도 균형이 가장 좋습니다. CER 0.03 으로 Whisper 에
-  근접하면서 RTF 는 1/15 입니다. 다만 단어 타임스탬프가 없어 발화 단위 시각만 나옵니다.
-- **Whisper** 는 정확도 기준점이지만 첫 partial 이 2.6 s 로 가장 느립니다.
+모든 엔진은 `stt/asr/base.py` 의 `ASREngine` 을 구현하며, 세션은 아래 세 속성만 보고 처리 경로를 고릅니다.
 
-### 튜닝하며 알게 된 것
+| 속성 | 의미 | 해당 엔진 |
+|---|---|---|
+| `native_streaming` | `accept_waveform()` / `partial()` 로 블록마다 가설 갱신 | Zipformer |
+| `decodes_full_utterance` | 윈도우를 자르지 않고 발화 시작부터 현재까지 매번 재인식 | SenseVoice, Fun-ASR |
+| `has_word_timestamps` | 단어 시각으로 겹침 제거·확정 | Whisper, Zipformer |
 
-- **무음에 `initial_prompt` 를 붙여 디코딩하면 안 됩니다.** Whisper 가 프롬프트를
-  이어 쓰려고 헛돌아 `small` 기준 한 번에 **10 초** 넘게 걸립니다(0.9 s → 10.7 s).
-  그래서 `WhisperEngine.warmup()` 은 프롬프트 없이 돌리고, 세션은
-  노이즈 플로어 수준인 윈도우의 추론을 아예 건너뜁니다(`_is_silent`).
-  이 처리로 `small` 의 warmup 13.3 s → 0.9 s, final 지연 9.1 s → 0.8 s 가 됐습니다.
-- 무음 구간 추론을 건너뛰면 없는 말을 지어내는 환각도 함께 줄어듭니다.
-- `initial_prompt` 자체는 실제 음성에서 +0.2 s 수준이라 유지할 만합니다.
+### 3.2 Whisper (`stt/asr/whisper.py`)
+
+- **정확도 기준점(baseline)**. autoregressive 라 느리고 첫 partial 이 늦습니다.
+- partial 윈도우는 `beam_size=1`, 발화 확정 시 1회만 `final_beam_size=5` 로 다시 디코딩합니다.
+- `initial_prompt` 에 ER 용어 사전(`medical_terms.TERMS`)을 넣어 도메인 어휘 쪽으로 편향시킵니다.
+- `condition_on_previous_text=False`, `vad_filter=False`(VAD 는 세션에서 수행).
+- 모델은 프로세스 전역 캐시(`_MODEL_CACHE`)로 **한 번만 로드**되고 세션 간에 공유됩니다.
+- CPU int8 에서는 `small` 까지가 실시간입니다. `medium` 이상은 GPU 를 쓰세요.
+
+### 3.3 Zipformer (`stt/asr/zipformer.py`)
+
+- **유일한 진짜 streaming 엔진**. 100 ms 마다 가설을 갱신하므로 첫 partial 이 가장 빠릅니다.
+- sherpa-onnx 내장 endpoint 규칙을 세션 VAD 와 함께 씁니다
+  (`rule2_min_trailing_silence = max(0.4, silence_sec)`, `rule3 = max_utterance_sec`).
+- BPE 토큰의 선행 공백(`▁`)을 어절 경계로 삼아 단어를 다시 묶습니다
+  (`get_result()` 는 공백이 지워진 문자열을 주기 때문).
+- endpoint 직후 마지막 어절이 잘리지 않도록 0.3 s 무음을 흘려 넣어 꼬리 토큰을 끌어냅니다.
+- 받아 쓴 모델은 일상 대화(KsponSpeech)로 학습돼 **의료 용어 정확도가 매우 낮습니다**. 의료 도메인에는 fine-tuning 이 필요합니다.
+- 한국어 전용 모델입니다.
+
+### 3.4 SenseVoice (`stt/asr/sensevoice.py`)
+
+- non-autoregressive 라 RTF ≈ 0.02 로 매우 빠릅니다. 그래서 윈도우를 자르지 않고
+  **발화 전체를 `refresh_sec`(0.8 s) 마다 다시 인식**하고 최신 가설로 교체합니다.
+  잘린 오디오의 오인식과 윈도우 간 중복이 함께 사라집니다.
+- 단어 타임스탬프가 없어, 발화 구간을 어절 수로 **균등 분할한 추정 시각**을 씁니다.
+  final 의 `start_time`/`end_time` 은 발화 단위로만 신뢰하세요.
+- 다국어(zh/en/ja/ko/yue) 모델이며 `language` 로 언어를 지정합니다. ITN(숫자 정규화) 사용.
+
+### 3.5 Fun-ASR-MLT-Nano-2512 (`stt/asr/funasr_mlt_nano.py`)
+
+- FunASR `AutoModel.generate` 를 쓰는 LLM 기반 다국어 ASR 입니다
+  (`models/funasr_mlt_nano/` 에 Qwen3-0.6B 디코더 포함).
+- `models/funasr_mlt_nano/model.pt` 가 있으면 로컬 모델을, 없으면 Hugging Face 에서 받습니다.
+- 모델이 커서 CPU 에서 0.8 s 갱신을 따라가지 못하므로 **갱신 주기를 최소 5 s** 로 둡니다
+  (`StreamingSession.start()`). partial 이 드물게 갱신되는 것은 정상입니다.
+- 추론마다 16 kHz 임시 WAV 를 만들어 파일 경로로 넘깁니다(공식 API 입력 형식).
+- `language` 는 `ko`/`en`/`zh`/`ja`/`yue` 를 모델의 언어명으로 매핑합니다. 타임스탬프 미지원.
+- 데이터셋 평가에서 **정확도가 가장 높았습니다**([8.2](#82-데이터셋-평가-결과)).
+
+### 3.6 엔진 선택 가이드
+
+| 목적 | 추천 | 이유 |
+|---|---|---|
+| 실시간 표시 + 적당한 정확도 | **SenseVoice** | 빠르고(RTF 0.02) 실시간 여유가 가장 큼 |
+| 정확도 우선 (GPU 있음) | **Fun-ASR-MLT-Nano** | CER·의료용어 정확도 최고. partial 갱신은 5 s 간격 |
+| 비교 기준점 | Whisper `small` | 단어 타임스탬프가 가장 정확. CPU 에서는 실시간 한계 근처 |
+| 지연 실험 | Zipformer | 가장 빠르지만 현재 모델로는 의료 대화 인식 불가 수준 |
 
 ---
 
-## 6. WebSocket 프로토콜
+## 4. 파이프라인 구조
 
-브라우저/Streamlit 용 `/ws` 규격입니다. External Backend 는 아래
-[Backend WebSocket API](#backend-websocket-api) 의 `/ws/stt` 를 쓰세요.
+### 4.1 전체 흐름
+
+```
+WebSocket binary (PCM16 LE, 16 kHz, mono)
+   │
+   ▼
+StreamingSession.feed()              ← 논블로킹. PCM16 → float32, 필요 시 리샘플
+   │  queue
+   ▼  ─────────────── 세션 전용 워커 스레드 ───────────────
+   ├─→ WavRecorder                   → recordings/<stt_session_id>.wav
+   ├─→ EndpointDetector (VAD)        → 발화 시작 / 끝(endpoint) 판정
+   │
+   ├─ windowed 엔진 ──→ SlidingWindowBuffer ──→ ASREngine.transcribe(audio, t0)
+   └─ native 엔진   ──→ ASREngine.accept_waveform() / partial() / is_endpoint()
+   │
+   ▼
+TranscriptMerger                     → stable(확정) + unstable(흔들리는 꼬리)
+   │
+   ▼
+medical_terms.correct()              → 의료 용어 후처리 (medical_correction=True)
+   │
+   ▼
+Event(partial / final / metrics / error)
+   │
+   ▼
+WebSocket 어댑터                      → /stream: transcript 규격 / /browser: UI 규격
+```
+
+### 4.2 모듈별 역할
+
+| 단계 | 모듈 | 하는 일 |
+|---|---|---|
+| 입력 변환 | `stt/audio/resampler.py` | PCM16 ↔ float32, 리샘플, RMS(dBFS) |
+| 녹음 | `stt/audio/recorder.py` | 수신 오디오를 WAV 로 실시간 append |
+| VAD / endpoint | `stt/audio/vad.py` | 적응형 노이즈 플로어 RMS VAD(`webrtcvad` 있으면 사용). 무음 `silence_sec` 이상이면 endpoint, `max_utterance_sec` 넘으면 강제 확정 |
+| 윈도우 | `stt/audio/buffer.py` | sliding window + overlap. 발화 첫 윈도우는 `first_hop_sec` 로 짧게 끊어 첫 partial 을 앞당김 |
+| ASR | `stt/asr/*.py` | 엔진 어댑터 ([3장](#3-지원-stt-모델)) |
+| 병합 | `stt/transcript/merger.py` | 겹침 제거, stable/unstable 관리, 발화 확정 |
+| 후처리 | `stt/transcript/medical_terms.py` | 오인식 사전 치환 + 유사도 교정, Whisper `initial_prompt` 생성 |
+| 지표 | `stt/metrics/latency.py` | RTF, 첫 partial, final 지연, CPU/메모리 |
+| 세션 | `stt/session.py` | 위 단계를 묶는 스레드 안전한 파이프라인 |
+
+### 4.3 엔진별 처리 경로
+
+| 경로 | 엔진 | 동작 | 병합기 진입점 |
+|---|---|---|---|
+| sliding window | Whisper | 5 s 윈도우를 3.5 s 마다 인식(첫 윈도우 1.5 s) | `update(words)` — 단어 시각 기준 정렬 |
+| 발화 전체 재인식 | SenseVoice, Fun-ASR | 발화 시작~현재를 `refresh_sec` 마다 다시 인식 | `replace_text(text)` — 최신 가설로 교체 |
+| native streaming | Zipformer | 100 ms 마다 가설 갱신, **가설이 바뀐 경우에만** 병합 | `update(words)` |
+
+노이즈 플로어 수준인 윈도우는 추론을 건너뜁니다(`_is_silent`). 무음에서 Whisper 가
+없는 말을 지어내거나 `initial_prompt` 때문에 수 초씩 헛도는 것을 막기 위해서입니다.
+
+### 4.4 TranscriptMerger — 중복·누락 없이 합치기
+
+윈도우가 겹치므로 같은 단어가 여러 번 나오고, Whisper 는 앞 단어를 고쳐 쓰기도 합니다.
+
+1. **시각 기준 제거** — 이미 확정된 시각 이전의 단어는 버린다.
+2. **텍스트 기준 제거** — 확정된 꼬리와 새 가설의 머리가 겹치면 잘라낸다(타임스탬프가 수십 ms 씩 흔들리기 때문).
+3. **LocalAgreement-2** — 두 번 연속 같게 나온 접두사만 stable 로 확정, 나머지는 unstable.
+4. 다음 윈도우가 이어받지 못하는 단어는 버리지 않고 그 시점에 확정한다.
+5. endpoint 에서 unstable 까지 모두 확정해 **발화(Utterance) 하나**를 만든다 → final.
+
+이 규칙들은 `tests/test_pipeline.py` 의 window/overlap/지터 조합 회귀 테스트로 고정돼 있습니다.
+
+### 4.5 세션 수명과 종료(flush)
+
+```
+open_session()   StreamingSession 생성 → start()(모델 로드, 워커 시작) → warmup()
+feed() × N       오디오 블록 투입
+close_session()  stop(): 큐 잔여 처리 → 버퍼/디코더 flush → 마지막 final emit
+                        → recorder close → 요약 반환
+                 save_transcript(): transcripts/<id>.json, .txt 저장
+```
+
+`/ws/v1/stt/stream` 은 `close` 를 받으면 위 flush 가 **끝난 뒤**에 `done` 을 보냅니다.
+`stop()` 안에서 나온 final 은 `done` 보다 항상 먼저 전송됩니다.
+
+### 4.6 세션 이벤트 (내부)
+
+| type | 필드 | 발생 |
+|---|---|---|
+| `ready` | `session_id`, `engine`, `config` | 세션 시작 |
+| `partial` | `stable`(세션 전체 확정문), `partial`, `committed`, `utterance`(현재 발화) | 가설이 바뀔 때 |
+| `final` | `text`, `start`, `end`, `index`, `stable` | endpoint · 종료 flush |
+| `metrics` | RTF, 지연, 큐 길이, 레벨 등 | 약 2 s 마다 |
+| `error` | `message` | 추론 실패(세션은 계속 동작) |
+
+WebSocket 어댑터가 이 이벤트를 각 API 규격으로 변환합니다.
+
+---
+
+## 5. STT API
+
+### 5.1 엔드포인트
+
+REST 는 **`/api/v1/stt`**, WebSocket 은 **`/ws/v1/stt`** 를 base path 로 씁니다
+(`stt/config.py` 의 `API_BASE` / `WS_BASE`).
+
+| 종류 | 경로 | 용도 |
+|---|---|---|
+| WebSocket | `/ws/v1/stt/stream` | **외부 서비스용 실시간 전사** |
+| WebSocket | `/ws/v1/stt/browser` | Streamlit 실시간 전사 페이지 전용 |
+| GET | `/api/v1/stt/health` | 서버 상태, 활성 세션 |
+| GET | `/api/v1/stt/engines` | 엔진별 설치·모델 준비 상태, 기본 설정 |
+| GET | `/api/v1/stt/sessions` | 활성 / 저장된 세션 ID (최근 50개) |
+| GET | `/api/v1/stt/sessions/{session_id}/transcript` | 저장된 전사 결과(JSON) |
+| GET | `/api/v1/stt/sessions/{session_id}/audio` | 저장된 녹음(WAV) |
+
+```
+ws://<host>:8000/ws/v1/stt/stream
+wss://<podId>-8000.proxy.runpod.net/ws/v1/stt/stream     # RunPod 프록시
+```
+
+### 5.2 실시간 전사 WebSocket — `/ws/v1/stt/stream`
+
+연결 하나가 오디오 스트림 하나(STT 세션 하나)입니다. Backend 는 연결과 예진 세션을 스스로 매핑합니다.
+로그 추적이 필요하면 `?triage_session_id=<uuid>` 를 붙이세요 — **서버 로그에만** 남고 응답에는 포함되지 않습니다.
+
+#### Backend → STT
+
+| 메시지 | 형식 | 내용 |
+|---|---|---|
+| 오디오 | binary frame | raw **PCM16 little-endian / 16 kHz / mono**, 100 ms = 1,600 samples = **3,200 bytes** |
+| 종료 | text frame | `close` (`{"type":"close"}` 도 허용) |
+
+프레임 처리 규칙:
+
+- 3,200 B 가 아닌 프레임도 받습니다(첫 1회 경고 로그).
+- 홀수 길이로 샘플이 쪼개지면 남는 1 바이트를 다음 프레임 앞에 붙여 정렬을 유지합니다.
+- 빈 프레임은 무시합니다.
+- 1 s(32,000 B)를 넘는 프레임은 버리고 `Invalid audio frame` 을 보냅니다. 연결은 유지됩니다.
+
+#### STT → Backend
+
+모든 응답은 JSON text frame 입니다.
 
 ```jsonc
-// client → server
-{"type":"start","engine":"whisper","model_size":"small","language":"ko",
- "sample_rate":16000,"window_sec":5,"overlap_sec":1.5,"silence_sec":0.7}
-<binary>                       // PCM16 little-endian mono
-{"type":"stop"}
-
-// server → client
-{"type":"ready",   "session_id":"...", "engine":"whisper", "config":{...}}
-{"type":"partial", "stable":"...", "partial":"...", "committed":"..."}
-{"type":"final",   "text":"...", "start":0.0, "end":3.2, "index":0}
-{"type":"metrics", "rtf_mean":0.42, "first_partial_ms":1830, ...}
-{"type":"closed",  "summary":{...}, "text":"...", "transcript":"...", "wav":"..."}
-```
-
-## Backend WebSocket API
-
-External Backend 가 STT 서버에 붙는 인터페이스입니다. STT 서버는 **Audio →
-Transcript** 까지만 책임지며 conversation/turn 번호, KTAS 판단, LLM 호출, 화자
-역할(환자/의료진) 추정은 하지 않습니다. 연결 하나 = 오디오 스트림 하나이고,
-Backend 가 연결과 예진 세션(UUID)을 스스로 매핑합니다.
-
-### Endpoint
-
-```
-ws://<host>:8000/ws/stt
-wss://<podId>-8000.proxy.runpod.net/ws/stt       # RunPod
-```
-
-선택: `?triage_session_id=<uuid>` 를 붙이면 서버 **로그에만** 함께 남습니다
-(STT 내부 세션 ID 와는 별개이며 응답에는 포함되지 않습니다).
-
-### Backend → STT
-
-**Binary** — 오디오
-
-| 항목 | 값 |
-|---|---|
-| format | raw PCM, signed **PCM16**, **little-endian** |
-| sample rate | **16 kHz** |
-| channels | **mono** |
-| chunk | **100 ms** = 1,600 samples = **3,200 bytes** |
-
-- 3200 B 가 아닌 프레임도 받습니다(경고 로그). 홀수 길이로 샘플이 쪼개지면
-  남는 바이트를 다음 프레임에 이어 붙입니다.
-- 빈 프레임은 무시합니다. 1 s(32,000 B)를 넘는 프레임은 버리고
-  `{"type":"error","message":"Invalid audio frame"}` 를 보냅니다. 연결은 유지됩니다.
-
-**Close** — 오디오 전송 종료 (text frame)
-
-```
-close
-```
-
-`close` 를 받으면 남은 오디오 → ASR 디코더 → TranscriptMerger 를 flush 하고,
-남은 final 을 모두 보낸 뒤 **마지막에** `done` 을 보내고 연결을 닫습니다(1000).
-
-### STT → Backend
-
-**Partial** — 현재 발화의 중간 결과. 화면 표시용이며 DB 저장용이 아닙니다.
-직전과 같은 텍스트는 다시 보내지 않습니다.
-
-```json
+// partial — 현재 발화의 중간 결과. 화면 표시용이며 DB 저장용이 아님. 직전과 같으면 보내지 않음
 {"type": "transcript", "text": "가슴이", "is_final": false}
-```
 
-**Final** — 발화 하나의 확정 결과. Backend 의 conversation row 하나에 해당합니다.
-
-```json
+// final — 발화 하나의 확정 결과 = Backend conversation row 하나
 {"type": "transcript", "text": "가슴이 답답해요", "is_final": true,
  "start_time": 12.4, "end_time": 15.6}
+
+// error — 안전한 문구만 전달(traceback·경로·예외 내용은 서버 로그에만)
+{"type": "error", "message": "STT inference failed"}
+
+// done — close 이후 flush 완료. 항상 마지막 메시지
+{"type": "done"}
 ```
 
-`start_time` / `end_time` 은 선택 필드로, **이 연결에 들어온 오디오 기준 초**입니다
-(`STT_TIMESTAMPS=0` 이면 빠집니다). SenseVoice/Fun-ASR 은 발화 단위 시각입니다.
+- `start_time` / `end_time` 은 선택 필드로, **이 연결로 받은 오디오 기준 상대 시각(초)** 입니다.
+  `STT_TIMESTAMPS=0` 이면 빠집니다.
+- `turn_id`, `conversation_id`, 화자/역할, 세션 ID 는 보내지 않습니다.
 
-**Error**
-
-```json
-{"type": "error", "message": "..."}
-```
+#### 오류 메시지
 
 | message | 상황 | 이후 |
 |---|---|---|
 | `STT engine initialization failed` | 모델 로드 실패 | 연결 종료 (1011) |
-| `STT inference failed` | 추론 중 오류 (초당 최대 1회) | 계속 동작 |
+| `STT inference failed` | 추론 중 오류 (초당 최대 1회 통지) | 계속 동작 |
 | `Invalid audio frame` | 1 s 초과 프레임 | 해당 프레임만 버림 |
 | `Unknown control message` | `close` 가 아닌 text frame | 계속 동작 |
 | `Internal STT server error` | 예기치 못한 서버 오류 | 연결 종료 (1011) |
 
-traceback·파일 경로·예외 내용은 서버 로그에만 남습니다.
-
-**Done** — flush 가 끝났다는 신호. 항상 마지막 메시지입니다.
-
-```json
-{"type": "done"}
-```
-
-### 흐름 예시
+#### 흐름
 
 ```
-Backend                                STT
-  ── connect /ws/stt ─────────────────▶
-  ── <3200 B> <3200 B> <3200 B> … ────▶
+Backend                                     STT
+  ── connect /ws/v1/stt/stream ────────────▶  세션 생성 · 모델 로드
+  ── <3200 B> <3200 B> <3200 B> … ─────────▶
   ◀── {"type":"transcript","text":"가슴이","is_final":false}
   ◀── {"type":"transcript","text":"가슴이 답답해요","is_final":false}
-  ◀── {"type":"transcript","text":"가슴이 답답해요","is_final":true,…}
-  ── <3200 B> … ──────────────────────▶
-  ── "close" ─────────────────────────▶
+  ◀── {"type":"transcript","text":"가슴이 답답해요","is_final":true,…}   ← 무음 → endpoint
+  ── <3200 B> … ───────────────────────────▶
+  ── "close" ──────────────────────────────▶  남은 오디오 · 디코더 · 병합기 flush
   ◀── {"type":"transcript","text":"(남은 발화)","is_final":true,…}
   ◀── {"type":"done"}
   ◀── close(1000)
 ```
 
-Backend 가 `close` 없이 끊으면 STT 는 flush·WAV/전사 저장·세션 정리만 하고
-아무것도 보내지 않습니다.
+`close` 없이 연결이 끊기면 STT 는 flush · WAV/전사 저장 · 세션 정리만 하고 아무것도 보내지 않습니다.
 
-### 서버 설정
-
-엔진·윈도우 같은 ASR 설정은 Backend 가 보내지 않고 STT 서버 환경변수로 정합니다.
-엔진을 바꿔도 Backend 프로토콜은 그대로입니다.
-
-| 환경변수 | 예 | 의미 |
-|---|---|---|
-| `STT_ENGINE` | `sensevoice` | `whisper` · `zipformer` · `sensevoice` · `funasr_mlt_nano` |
-| `STT_MODEL_SIZE` | `small` | Whisper 모델 크기 |
-| `STT_CONFIG` | `{"silence_sec":0.6,"save_wav":false}` | `StreamConfig` 필드 덮어쓰기 (JSON) |
-| `STT_TIMESTAMPS` | `1` | final 에 `start_time`/`end_time` 포함 (기본 1) |
+### 5.3 REST API
 
 ```bash
-STT_ENGINE=sensevoice python -m server.main --host 0.0.0.0 --port 8000
+curl http://localhost:8000/api/v1/stt/health
+curl http://localhost:8000/api/v1/stt/engines
+# {"engines":{"whisper":{"ready":true,"detail":"faster-whisper"}, ...},
+#  "whisper_sizes":["tiny","base","small","medium","large-v3"], "defaults":{...}}
+
+curl http://localhost:8000/api/v1/stt/sessions
+# {"active":[],"saved":["20260927-172618-6ed053", ...]}
+
+curl http://localhost:8000/api/v1/stt/sessions/20260927-172618-6ed053/transcript
+# {"session_id":"...","engine":"sensevoice","stable":"...","partial":"",
+#  "utterances":[{"text":"...","start":0.0,"end":6.1}],
+#  "metrics":{"rtf_mean":...,"first_partial_ms":...,"final_latency_ms":...}, "wav":"...", "error":null}
+
+curl -o session.wav http://localhost:8000/api/v1/stt/sessions/20260927-172618-6ed053/audio
 ```
 
-연결마다 엔진을 새로 로드하므로(브라우저 `/ws` 와 같음) 첫 오디오가 모델 로드
-시간만큼 늦게 처리될 수 있습니다. 그동안 보낸 프레임은 버려지지 않고 처리됩니다.
+`session_id` 는 STT 내부 ID(`YYYYMMDD-HHMMSS-xxxxxx`)입니다. `/ws/v1/stt/stream` 응답에는
+나오지 않으므로 이 API 들은 운영·디버깅 용도입니다.
 
-## 7. 개발 순서 대비 현황
+### 5.4 클라이언트 예제
 
-| 단계 | 상태 |
-|---|---|
-| 1. Web Audio + WebSocket (PCM16 / 16 kHz / WAV 저장) | 구현 완료 |
-| 1-b. RunPod 배포 (브라우저 수음 + 서버 추론 분리) | 구현 완료 |
-| 2. Whisper baseline (sliding window + overlap, partial) | 구현 완료 |
-| 3. Transcript merge (stable/unstable, overlap dedup) | 구현 완료 · 회귀 테스트 |
-| 4. Metrics logging (RTF, latency, 자원 사용) | 구현 완료 |
-| 5. Zipformer backend (sherpa-onnx, native streaming, endpoint) | 구현 완료 · 한국어 모델 연결 |
-| 6. SenseVoice backend (발화 전체 재인식) | 구현 완료 · 한국어 모델 연결 |
+#### 오디오 준비
 
-## 8. API 사용 방법
-
-STT 서버를 다른 서비스에서 API 로 쓰는 방법입니다. 실시간 전사는 WebSocket
-`/ws/stt`, 상태·결과 조회는 REST `/api/*` 를 씁니다. 메시지 규격의 세부 사항은
-[Backend WebSocket API](#backend-websocket-api) 를 참고하세요.
-
-### 8.1 서버 실행
+`/ws/v1/stt/stream` 은 **헤더 없는 raw PCM** 만 받습니다.
 
 ```bash
-source .venv/bin/activate
-STT_ENGINE=sensevoice python -m server.main --host 0.0.0.0 --port 8000
-```
-
-엔진은 서버 쪽 환경변수로 고릅니다(`STT_ENGINE`, `STT_MODEL_SIZE`, `STT_CONFIG`).
-클라이언트는 엔진을 몰라도 되고, 엔진을 바꿔도 클라이언트 코드는 그대로입니다.
-
-### 8.2 엔드포인트
-
-| 종류 | 경로 | 용도 |
-|---|---|---|
-| WebSocket | `/ws/stt` | **외부 서비스용 실시간 전사** (PCM16 → transcript) |
-| WebSocket | `/ws` | Streamlit/브라우저 UI 전용 (6장 규격) — 외부 연동에는 쓰지 마세요 |
-| GET | `/api/health` | 서버 상태, 활성 세션 수 |
-| GET | `/api/engines` | 엔진별 설치·모델 준비 상태, 기본 설정 |
-| GET | `/api/sessions` | 활성 세션 / 저장된 세션 ID 목록(최근 50개) |
-| GET | `/api/sessions/{session_id}/transcript` | 저장된 전사 결과(JSON) |
-| GET | `/api/sessions/{session_id}/audio` | 저장된 녹음(WAV) |
-
-### 8.3 상태 확인
-
-```bash
-curl http://localhost:8000/api/health
-# {"status":"ok","sample_rate":16000,"active_sessions":[],"gpu_memory_mb":null}
-
-curl http://localhost:8000/api/engines
-# {"engines":{"whisper":{"ready":true,...},"sensevoice":{"ready":true,...}, ...},
-#  "whisper_sizes":[...], "defaults":{...}}
-```
-
-배포 후 헬스체크나 준비 상태 확인(readiness probe)에는 `/api/health` 를 쓰면 됩니다.
-
-### 8.4 오디오 준비
-
-`/ws/stt` 는 **헤더 없는 raw PCM16 / little-endian / 16 kHz / mono** 만 받습니다.
-WAV 파일이라면 헤더를 떼고 샘플만 보내야 합니다.
-
-```bash
-# 임의의 오디오 → raw PCM (ffmpeg)
-ffmpeg -i input.m4a -ac 1 -ar 16000 -f s16le sample.pcm
+ffmpeg -i input.m4a -ac 1 -ar 16000 -f s16le sample.pcm          # 임의 오디오 → raw PCM
 ```
 
 ```python
-# 16 kHz / mono / 16-bit WAV → raw PCM (Python 표준 라이브러리)
-import wave
+import wave                                                      # 16 kHz/mono/16-bit WAV → raw PCM
 with wave.open("sample.wav") as wf:
     pcm = wf.readframes(wf.getnframes())
 ```
 
-마이크 입력을 중계할 때도 같은 형식으로 100 ms(3,200 bytes) 단위로 보내면 됩니다.
-
-### 8.5 Python 클라이언트
-
-`websockets` 패키지를 씁니다(`uvicorn[standard]` 설치 시 함께 설치됨).
+#### Python (`websockets`, `uvicorn[standard]` 설치 시 포함)
 
 ```python
 import asyncio
@@ -558,7 +418,7 @@ import wave
 
 import websockets
 
-URL = "ws://localhost:8000/ws/stt"
+URL = "ws://localhost:8000/ws/v1/stt/stream"
 FRAME_BYTES = 3200                     # 100 ms = 1600 samples × 2 bytes
 
 
@@ -598,24 +458,20 @@ if __name__ == "__main__":
 ```
 
 ```text
-$ python stt_client.py recordings/sample.wav
+$ python stt_client.py recordings/sample.wav          # STT_ENGINE=sensevoice
 [partial] 오늘 아침부터.
 [partial] 오늘 아침 부터 배가 아팠 습니다.
 ...
 [final]   오늘 아침부터 배가 아팠습니다 구토도 두 번습니다 열도 조금 났습니다. 0.0 6.1
-['오늘 아침부터 배가 아팠습니다 구토도 두 번습니다 열도 조금 났습니다.']
 ```
 
-### 8.6 Node.js 클라이언트
-
-Node 22 이상은 `WebSocket` 이 내장돼 있어 추가 패키지가 필요 없습니다
-(그 이하 버전은 `ws` 패키지를 쓰세요).
+#### Node.js (22 이상은 `WebSocket` 내장, 그 이하는 `ws` 패키지)
 
 ```js
 // node stt_client.mjs sample.pcm
 import { readFileSync } from "node:fs";
 
-const URL = "ws://localhost:8000/ws/stt";
+const URL = "ws://localhost:8000/ws/v1/stt/stream";
 const FRAME_BYTES = 3200;                        // 100 ms
 const pcm = readFileSync(process.argv[2]);       // raw PCM16 LE / 16 kHz / mono
 
@@ -642,40 +498,271 @@ ws.onmessage = ({ data }) => {
 };
 ```
 
-### 8.7 연동 시 지켜야 할 것
+### 5.5 연동 체크리스트
 
-- **연결 하나 = 오디오 스트림 하나.** 예진 세션을 시작할 때 연결을 열고 끝날 때
-  닫습니다. 여러 세션의 오디오를 한 연결에 섞지 마세요. 로그 추적이 필요하면
-  `?triage_session_id=<uuid>` 를 붙입니다(응답에는 포함되지 않습니다).
-- **final 만 저장합니다.** `is_final: true` 하나가 발화 하나(= conversation row
-  하나)입니다. partial 은 같은 발화의 중간 결과라 계속 바뀌므로 화면 표시에만 씁니다.
-- **`close` 를 보낸 뒤 `done` 을 받을 때까지 연결을 유지하세요.** 마지막 발화의
-  final 은 `close` 이후에 나옵니다. `done` 전에 끊으면 마지막 발화를 잃습니다.
-- **연결 직후에는 모델 로드 시간만큼 응답이 늦을 수 있습니다.** 그동안 보낸
-  오디오는 버려지지 않으므로 기다리지 않고 바로 보내도 됩니다.
-- **실시간 속도로 보내는 것을 권장합니다.** 파일을 한 번에 밀어 넣어도 전사는
-  되지만 서버 큐에 쌓여 partial 이 늦게 몰려 옵니다.
-- **`start_time` / `end_time` 은 연결 기준 상대 시각(초)입니다.** 재연결하면
-  0 부터 다시 셉니다. 절대 시각이 필요하면 Backend 가 연결 시작 시각을 더하세요.
-- **오류 처리.** `STT engine initialization failed` 나 `Internal STT server error`
-  를 받으면 서버가 연결을 끊으므로(1011) 새로 연결합니다. 나머지 오류는 연결이
-  유지되니 기록만 하고 계속 보내면 됩니다.
+- **연결 하나 = 오디오 스트림 하나.** 여러 세션의 오디오를 한 연결에 섞지 않습니다.
+- **final 만 저장합니다.** partial 은 같은 발화의 중간 결과라 계속 바뀝니다.
+- **`close` 후 `done` 을 받을 때까지 연결을 유지합니다.** 마지막 발화의 final 은 `close` 이후에 옵니다.
+- **연결 직후에는 모델 로드 시간만큼 응답이 늦을 수 있습니다.** 그동안 보낸 오디오는 버려지지 않습니다.
+- **실시간 속도(100 ms 간격)로 보내는 것을 권장합니다.** 한 번에 밀어 넣으면 서버 큐에 쌓여 partial 이 몰려 옵니다.
+- **시각은 연결 기준 상대값입니다.** 재연결하면 0 부터 다시 셉니다.
+- **`initialization failed` / `Internal STT server error` 는 연결이 끊기므로 재연결**하고, 나머지 오류는 기록만 하고 계속 보냅니다.
 
-### 8.8 전사·녹음 조회 (REST)
+### 5.6 브라우저 WebSocket — `/ws/v1/stt/browser`
 
-세션이 끝나면 서버가 전사 결과와 녹음을 `transcripts/`, `recordings/` 에
-저장합니다(`STT_CONFIG='{"save_wav":false}'` 이면 녹음은 생략). 여기서 쓰는
-`session_id` 는 STT 서버 내부 ID 라 `/ws/stt` 응답에는 나오지 않으므로,
-`/api/sessions` 목록에서 찾아 운영·디버깅 용도로 씁니다.
+Streamlit 실시간 전사 페이지(`web/live_mic.js`) 전용입니다. 외부 연동에는 `/stream` 을 쓰세요.
+
+```jsonc
+// client → server
+{"type":"start","engine":"whisper","model_size":"small","language":"ko","sample_rate":16000,
+ "window_sec":5,"overlap_sec":1.5,"silence_sec":0.7,"vad_threshold_db":12,
+ "medical_correction":true,"save_wav":true}
+<binary>                       // PCM16 little-endian mono (100~500 ms)
+{"type":"stop"}
+{"type":"ping"}                // → {"type":"pong"}
+
+// server → client
+{"type":"ready",   "session_id":"...", "engine":"whisper", "config":{...}}
+{"type":"partial", "stable":"...", "partial":"...", "committed":"...", "utterance":"..."}
+{"type":"final",   "text":"...", "start":0.0, "end":3.2, "index":0, "stable":"..."}
+{"type":"metrics", "rtf_mean":0.42, "first_partial_ms":1830, ...}
+{"type":"error",   "message":"..."}
+{"type":"closed",  "summary":{...}, "text":"...", "utterances":[...], "wav":"...", "transcript":"...", "session_id":"..."}
+```
+
+`start` 의 키는 `StreamConfig` 필드 이름과 같으며, 여기서는 클라이언트가 엔진을 고를 수 있습니다.
+
+---
+
+## 6. 설정
+
+### 6.1 환경변수
+
+| 환경변수 | 기본값 | 쓰는 곳 | 의미 |
+|---|---|---|---|
+| `STT_ENGINE` | `whisper` | `/stream` | `whisper` · `zipformer` · `sensevoice` · `funasr_mlt_nano` |
+| `STT_MODEL_SIZE` | `small` | `/stream` | Whisper 모델 크기 |
+| `STT_CONFIG` | (없음) | `/stream` | `StreamConfig` 필드 덮어쓰기 JSON. 예: `{"silence_sec":0.6,"save_wav":false}` |
+| `STT_TIMESTAMPS` | `1` | `/stream` | final 에 `start_time`/`end_time` 포함 |
+| `STT_BACKEND_PORT` | `8000` | Streamlit | 브라우저 WS 주소 유도에 쓰는 포트 |
+| `STT_API_URL` | `http://127.0.0.1:8000` | Streamlit | Python → STT 서버 (같은 인스턴스) |
+| `STT_WS_URL` | (비움 → 자동 유도) | Streamlit | 브라우저 → STT 서버. RunPod 은 `<podId>-<port>.proxy.runpod.net` 으로 유도 |
+
+`/stream` 설정은 **연결마다** 환경변수에서 읽어 `StreamConfig` 를 만듭니다. Backend 는 엔진 설정을 보내지 않습니다.
+
+### 6.2 `StreamConfig` (`stt/config.py`)
+
+| 분류 | 필드 | 기본값 | 설명 |
+|---|---|---|---|
+| 엔진 | `engine` | `whisper` | 사용할 엔진 |
+| | `model_size` | `small` | Whisper 크기 |
+| | `model_dir` | `None` | sherpa 모델 디렉터리 (기본 `models/<engine>`) |
+| | `device` | 자동 | CUDA 감지 시 `cuda`, 아니면 `cpu` |
+| | `compute_type` | 자동 | GPU `float16`, CPU `int8` (Whisper) |
+| | `language` | `ko` | 인식 언어 |
+| | `beam_size` / `final_beam_size` | `1` / `5` | Whisper partial / final 빔 크기 |
+| 윈도우 | `window_sec` / `overlap_sec` | `5.0` / `1.5` | sliding window (Whisper) |
+| | `min_window_sec` | `1.0` | 이보다 짧으면 추론 안 함 |
+| | `first_hop_sec` | `1.5` | 발화 첫 윈도우 길이 (첫 partial 지연) |
+| | `refresh_sec` | `0.8` | 발화 전체 재인식 주기 (Fun-ASR 은 최소 5 s) |
+| VAD | `silence_sec` | `0.7` | 이만큼 무음이면 발화 확정(final) |
+| | `max_utterance_sec` | `20.0` | 무음이 없어도 강제 확정 |
+| | `vad_threshold_db` | `12.0` | 노이즈 플로어 대비 음성 판정 마진 |
+| 후처리 | `medical_correction` | `True` | 의료 용어 교정 |
+| | `use_initial_prompt` | `True` | Whisper 에 ER 용어 프롬프트 |
+| 저장 | `save_wav` | `True` | `recordings/` 에 WAV 저장 |
+
+튜닝 팁:
+
+- 첫 partial 을 빠르게 → `first_hop_sec` ↓ (추론 횟수·CPU ↑)
+- 발화가 너무 잘게 끊김 → `silence_sec` ↑ / 발화 확정이 늦음 → `silence_sec` ↓
+- 시끄러운 환경에서 무음을 음성으로 인식 → `vad_threshold_db` ↑
+
+---
+
+## 7. Streamlit UI
 
 ```bash
-curl http://localhost:8000/api/sessions
-# {"active":[],"saved":["20260927-172618-6ed053", ...]}
-
-curl http://localhost:8000/api/sessions/20260927-172618-6ed053/transcript
-# {"session_id":"...","engine":"sensevoice","stable":"...",
-#  "utterances":[{"text":"...","start":0.0,"end":6.1}],
-#  "metrics":{"rtf_mean":...,"first_partial_ms":...}, "wav":"...", "error":null}
-
-curl -o session.wav http://localhost:8000/api/sessions/20260927-172618-6ed053/audio
+streamlit run streamlit_app.py --server.port 8501
 ```
+
+| 페이지 | 파일 | 하는 일 |
+|---|---|---|
+| 실시간 전사 | `app_pages/realtime.py` | 브라우저 마이크 → `/ws/v1/stt/browser` → partial/final, 라이브 지표. 엔진·윈도우·VAD 를 사이드바에서 선택 |
+| 파일 전사 | `app_pages/file_stt.py` | 업로드 / `st.audio_input` 녹음을 Whisper 로 통째로 전사. 정답(reference) 만들기용 |
+| 성능 비교 | `app_pages/metrics.py` | `transcripts/*.json` 을 모아 엔진별 RTF·지연·WER/CER 비교 |
+
+- 브라우저는 **HTTPS 또는 localhost** 에서만 마이크를 엽니다. RunPod 프록시는 HTTPS 라 그대로 동작합니다.
+- 마이크 컴포넌트는 Streamlit Custom Component **v2**(`web/live_mic.*`)라 iframe 없이 앱 문서 안에서
+  `getUserMedia` · `AudioWorklet` · `WebSocket` 을 씁니다. 부분 전사는 브라우저가 직접 그리고,
+  세션이 끝날 때만 결과를 Python 으로 올려 리런을 1회로 줄입니다.
+
+---
+
+## 8. 평가와 벤치마크
+
+### 8.1 지표
+
+| 지표 | 계산 위치 | 의미 |
+|---|---|---|
+| RTF | `metrics/latency.py` | 추론 시간 / 오디오 길이. **1.0 미만**이어야 실시간 |
+| First partial latency | 〃 | 발화 시작 → 첫 partial |
+| Final latency | 〃 | endpoint → final 확정 |
+| Revision rate | `transcript/merger.py` | 이미 보여준 partial 이 뒤집힌 비율 |
+| CPU / 메모리 / GPU | `metrics/latency.py` | psutil, torch |
+| WER / CER | `metrics/evaluator.py` | 한국어는 CER 이 더 신뢰할 만함 |
+| 의료용어 정확도 | 〃 | 정답 속 **의학용어 · 영문 약어** 중 전사에 살아남은 비율 |
+
+### 8.2 데이터셋 평가 결과
+
+`dataset/sound_data/` 응급실 예진 낭독 음성 **50개(총 43분, 파일당 31~75 s)** 를 4개 엔진에 통과시킨 결과입니다
+(`dataset/stt_all_summary.csv`, `dataset/evaluation.csv`). 기본 설정(`whisper small`, `language=ko`)이며
+100 ms 청크를 **가능한 한 빠르게** 투입하는 accelerated 모드로 측정했습니다.
+
+| 엔진 | WER | CER | 의료용어 정확도 | 평균 RTF | 실시간 통과 파일 |
+|---|---|---|---|---|---|
+| **Fun-ASR-MLT-Nano** | **0.54** | **0.44** | **0.65** (330/504) | 0.42 | 50/50 |
+| Whisper `small` | 0.61 | 0.48 | 0.54 (273/504) | 0.67 | 42/50 |
+| SenseVoice | 0.70 | 0.47 | 0.40 (200/504) | **0.02** | 50/50 |
+| Zipformer | 0.96 | 0.93 | 0.01 (6/504) | 0.03 | 50/50 |
+
+- accelerated 모드에서는 큐 대기가 섞이므로 **지연(ms) 값은 실제 라이브 지연이 아닙니다.** 라이브 지연은 `--paced` 로 측정하세요.
+- 측정 장치 정보는 결과 파일에 기록돼 있지 않습니다. 장치를 바꾸면 RTF 는 크게 달라집니다.
+- 절대 정확도가 모두 낮은 편이라, 의료 도메인 적용에는 용어 사전 보강이나 fine-tuning 이 필요합니다.
+
+### 8.3 스크립트
+
+| 명령 | 용도 |
+|---|---|
+| `python -m scripts.benchmark rec.wav --realtime --reference ref.txt` | WAV 하나를 여러 엔진으로 비교. 결과는 `transcripts/` → 성능 비교 페이지 |
+| `python -m scripts.evaluate_dataset [--paced] [--engines ...] [--file-ids ...]` | 데이터셋 전체 평가 → `dataset/evaluation.csv` |
+| `python -m scripts.merge_evaluations a.csv b.csv --output out.csv` | 엔진별로 나눠 돌린 평가 결과 병합 |
+| `python -m scripts.build_stt_test_csv` | 정답 CSV + 엔진별 전사·지표를 한 장의 표(`STT_test_50.csv`)로 |
+| `python -m scripts.reevaluate_stt_test_csv` | ASR 재실행 없이 저장된 전사를 현재 평가 규칙으로 재채점 |
+| `python -m scripts.build_stt_all_summary` | 모델별 요약(`stt_all_summary.csv`) |
+
+`--realtime` / `--paced` 는 오디오를 실제 속도로 흘려 넣습니다. **지연 지표는 이때만 의미가 있습니다.**
+
+### 8.4 튜닝하며 알게 된 것
+
+- **무음에 `initial_prompt` 를 붙여 디코딩하면 Whisper 가 10 s 넘게 헛돕니다.** warmup 은 프롬프트 없이 돌리고,
+  세션은 무음 윈도우 추론을 건너뜁니다. 이로써 `small` warmup 13.3 s → 0.9 s, final 지연 9.1 s → 0.8 s.
+- **네이티브 스트리밍 엔진은 같은 가설을 반복해서 줍니다.** 그대로 병합하면 LocalAgreement 가 저절로 성립해
+  자라는 중인 어절이 중복 확정됩니다(`척 척할려고`). 가설이 바뀔 때만 병합합니다.
+- **발화 전체를 재인식하는 엔진에 겹침 제거를 쓰면 중복됩니다.** 교체 경로(`replace_text`)로 분리했습니다.
+- Whisper 모델 크기(Apple Silicon CPU int8, 5.4 s 발화): `tiny` RTF 0.10 오인식 / `base` 0.24 환각 / `small` 0.44 정답 일치.
+
+---
+
+## 9. 프로젝트 구조
+
+```
+streamlit_demo/
+├── server/                      # ── STT 서버 (FastAPI) ──
+│   ├── main.py                  # 앱, REST /api/v1/stt/*, WS 라우터 등록
+│   ├── backend_ws.py            # /ws/v1/stt/stream — External Backend 어댑터
+│   └── websocket.py             # /ws/v1/stt/browser + 세션 공용 헬퍼(open/close_session)
+│
+├── stt/                         # ── STT 코어 (서버·Streamlit·스크립트 공용) ──
+│   ├── config.py                # 오디오 규격, 경로, API base path, StreamConfig
+│   ├── session.py               # StreamingSession (파이프라인 전체)
+│   ├── asr/
+│   │   ├── base.py              # ASREngine 인터페이스 + create_engine()
+│   │   ├── whisper.py           # faster-whisper
+│   │   ├── zipformer.py         # sherpa-onnx streaming zipformer
+│   │   ├── sensevoice.py        # sherpa-onnx SenseVoice
+│   │   └── funasr_mlt_nano.py   # Fun-ASR-MLT-Nano-2512
+│   ├── audio/                   # buffer(윈도우) · recorder(WAV) · resampler · vad
+│   ├── transcript/              # merger(병합) · medical_terms(용어 사전·교정)
+│   └── metrics/                 # latency(RTF·지연·자원) · evaluator(WER/CER/의료용어)
+│
+├── streamlit_app.py             # Streamlit 진입점
+├── app_pages/                   # realtime · file_stt · metrics
+├── web/                         # live_mic.{py,js,html,css} — 브라우저 마이크 컴포넌트
+│
+├── scripts/                     # fetch_models · benchmark · evaluate_dataset 외 평가 도구
+├── tests/                       # test_pipeline · test_backend_ws
+│
+├── models/                      # 모델 파일 (zipformer · sensevoice · funasr_mlt_nano)
+├── recordings/                  # 세션별 WAV
+├── transcripts/                 # 세션별 전사 (.json / .txt)
+└── dataset/                     # 평가 음성·정답·결과 CSV
+```
+
+### 새 엔진 추가하기
+
+1. `stt/asr/<name>.py` 에 `ASREngine` 을 상속해 `transcribe()` 를 구현합니다
+   (스트리밍 엔진이면 `accept_waveform` / `partial` / `is_endpoint` / `reset_stream` 도).
+2. `native_streaming` · `decodes_full_utterance` · `has_word_timestamps` 를 엔진 특성에 맞게 설정합니다.
+3. `stt/asr/base.py` 의 `create_engine()` 과 `stt/config.py` 의 `ENGINE_CHOICES` 에 등록합니다.
+4. `server/main.py` 의 `/engines` 준비 상태 확인에 분기를 추가합니다.
+
+세션·병합기·API 는 수정할 필요가 없습니다.
+
+---
+
+## 10. 테스트
+
+```bash
+pip install pytest httpx
+pytest tests/                    # 22개
+python -m tests.test_pipeline    # pytest 없이 파이프라인 테스트만
+```
+
+| 파일 | 검증 내용 |
+|---|---|
+| `tests/test_pipeline.py` | 병합기 중복·누락 회귀(window/overlap/지터 조합), 세션 end-to-end, 엔진별 병합 경로, WER/CER, 의료 용어 교정 |
+| `tests/test_backend_ws.py` | `/stream` 프레임 수신·순서, partial/final 형식, `close → final → done` 순서, 잘못된 프레임, 오류 메시지 비노출, 비정상 종료 시 자원 정리, `/browser` 호환, base path |
+
+WebSocket 테스트는 `stt.session.create_engine` 을 가짜 엔진으로 바꿔 끼워 모델 없이 돕니다.
+
+---
+
+## 11. RunPod 배포 참고
+
+- **Pod 로 운영합니다.** 장시간 양방향 WebSocket 과 모델 상주가 필요하기 때문입니다.
+- 포트 **8000**(STT 서버), 필요하면 **8501**(Streamlit)을 HTTP 포트로 노출합니다.
+  프록시 주소는 `https://<podId>-<port>.proxy.runpod.net` 이며 TLS 를 대신 처리합니다.
+- **모델을 영속 볼륨에 둡니다.** 저장소를 `/workspace` 아래에 두면 `models/` 가 재시작 후에도 남습니다.
+  Whisper 는 HF 캐시를 쓰므로 `HF_HOME=/workspace/hf_cache` 를 지정하세요.
+- 모델은 배포 단계에서 미리 받습니다(`python -m scripts.fetch_models`).
+- GPU 에서 sherpa-onnx 를 쓰려면 CUDA 휠로 바꿉니다. CPU 휠에 `provider="cuda"` 를 주면 경고만 내고 CPU 로 돕니다.
+
+  ```bash
+  pip install sherpa-onnx -f https://k2-fsa.github.io/sherpa/onnx/cuda.html
+  python -m scripts.fetch_models --keep all --force
+  ```
+
+- uvicorn 은 **worker 1개**로 띄웁니다. 여러 개면 모델이 GPU 에 중복으로 올라가고 세션 목록이 프로세스별로 갈립니다.
+  확장은 Pod 를 늘려서 합니다.
+- 헬스체크는 `/api/v1/stt/health` 를 씁니다.
+
+---
+
+## 12. 현재 제약과 남은 과제
+
+| 항목 | 현재 상태 | 영향 |
+|---|---|---|
+| 인증 | `/ws/v1/stt/*`, `/api/v1/stt/*` 모두 **없음** | 프록시 URL 을 알면 누구나 전사·**녹음 다운로드** 가능. 운영 전 필수 |
+| 녹음·전사 저장 | WAV 는 `save_wav` 로 끌 수 있으나 전사 JSON 은 항상 저장 | 환자 음성·대화가 서버 디스크에 남음 |
+| 모델 로드 | Whisper·Fun-ASR 은 프로세스 캐시, **sherpa 엔진은 연결마다 새로 로드** | 연결 직후 지연, 동시 접속 시 메모리 증가 |
+| readiness | `/health` 는 모델 로드 전에도 `ok` | 트래픽 투입 시점 판단 불가 |
+| 동시 접속 | 세션 수 제한 없음 | GPU 포화 시 모든 세션이 함께 느려짐 |
+| backpressure | 입력 큐 무제한 | 추론이 실시간보다 느리면 지연이 계속 늘어남 |
+| 재연결 | 이어 받기 없음 | 끊기면 진행 중 발화 유실, 시각 0 부터 재시작 |
+| 화자 분리 | 범위 밖 | 의료진·환자가 한 마이크를 공유 |
+| 도메인 정확도 | CER 0.44~0.93 | 용어 사전 보강 · fine-tuning 필요 |
+
+### 개발 현황
+
+| 단계 | 상태 |
+|---|---|
+| Web Audio + WebSocket (PCM16 / 16 kHz / WAV 저장) | 완료 |
+| RunPod 배포 (브라우저 수음 + 서버 추론 분리) | 완료 |
+| Whisper baseline (sliding window + overlap) | 완료 |
+| Transcript merge (stable/unstable, overlap dedup) | 완료 · 회귀 테스트 |
+| Metrics (RTF, latency, 자원) | 완료 |
+| Zipformer / SenseVoice / Fun-ASR-MLT-Nano 엔진 | 완료 |
+| 의료 데이터셋 50건 비교 평가 | 완료 (`dataset/`) |
+| External Backend API (`/ws/v1/stt/stream`) | 완료 · 통합 테스트 |
+| 인증 · 동시 접속 제한 · 엔진 사전 로드 | 예정 |

@@ -106,10 +106,11 @@ const METRIC_LABELS = {
 function resolveWsUrl(config) {
   if (config.ws_url) return config.ws_url;
   const port = config.backend_port || 8000;
+  const path = config.ws_path || "/ws/v1/stt/browser";
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
   const proxy = location.hostname.match(/^(.+)-\d+\.proxy\.runpod\.net$/);
-  if (proxy) return `${proto}//${proxy[1]}-${port}.proxy.runpod.net/ws`;
-  return `${proto}//${location.hostname}:${port}/ws`;
+  if (proxy) return `${proto}//${proxy[1]}-${port}.proxy.runpod.net${path}`;
+  return `${proto}//${location.hostname}:${port}${path}`;
 }
 
 class LiveMic {

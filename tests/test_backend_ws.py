@@ -1,4 +1,4 @@
-"""External Backend 용 `/ws/stt` 어댑터를 가짜 엔진으로 검증한다.
+"""External Backend 용 `/ws/v1/stt/stream` 어댑터를 가짜 엔진으로 검증한다.
 
     pytest tests/test_backend_ws.py
 
@@ -22,7 +22,7 @@ from server.main import app
 from server.websocket import SESSIONS
 from stt.asr.base import ASREngine, ASRResult
 from stt.audio.recorder import WavRecorder
-from stt.config import SAMPLE_RATE
+from stt.config import API_BASE, SAMPLE_RATE, WS_BROWSER_PATH, WS_STREAM_PATH
 from stt.session import StreamingSession
 
 SCRIPT = "가슴이 답답해요 어제부터 계속".split()
@@ -98,7 +98,7 @@ def _receive_until_done(ws, limit: int = 200) -> list[dict]:
 
 
 def _run_utterance(client, frames: list[bytes]) -> list[dict]:
-    with client.websocket_connect("/ws/stt") as ws:
+    with client.websocket_connect(WS_STREAM_PATH) as ws:
         for frame in frames:
             ws.send_bytes(frame)
         ws.send_text("close")
@@ -189,7 +189,7 @@ def test_close_flushes_remaining_final_before_done(stt) -> None:
 def test_invalid_frames_do_not_crash_server(stt) -> None:
     frames = _utterance_frames()
     odd_a, odd_b = frames[0][:1601], frames[0][1601:]     # 샘플이 쪼개진 프레임
-    with stt["client"].websocket_connect("/ws/stt") as ws:
+    with stt["client"].websocket_connect(WS_STREAM_PATH) as ws:
         ws.send_bytes(b"")                                  # 빈 프레임: 무시
         ws.send_bytes(b"\x00" * (MAX_FRAME_BYTES + 2))      # 과대 프레임: error 후 버림
         assert ws.receive_json() == {"type": "error", "message": "Invalid audio frame"}
@@ -226,7 +226,7 @@ def test_engine_init_failure_returns_safe_error(stt, monkeypatch) -> None:
         raise RuntimeError("/models/zipformer 에 모델 파일이 없습니다")
 
     monkeypatch.setattr(session_module, "create_engine", broken)
-    with stt["client"].websocket_connect("/ws/stt") as ws:
+    with stt["client"].websocket_connect(WS_STREAM_PATH) as ws:
         assert ws.receive_json() == {
             "type": "error", "message": "STT engine initialization failed"
         }
@@ -234,7 +234,7 @@ def test_engine_init_failure_returns_safe_error(stt, monkeypatch) -> None:
 
 
 def test_abrupt_disconnect_releases_resources(stt) -> None:
-    with stt["client"].websocket_connect("/ws/stt") as ws:
+    with stt["client"].websocket_connect(WS_STREAM_PATH) as ws:
         for frame in _utterance_frames()[:SPEECH_FRAMES]:
             ws.send_bytes(frame)
         assert _wait_until(lambda: len(stt["fed"]) == SPEECH_FRAMES)
@@ -248,8 +248,8 @@ def test_abrupt_disconnect_releases_resources(stt) -> None:
 
 
 def test_legacy_browser_ws_protocol_still_works(stt) -> None:
-    """Streamlit/브라우저용 /ws 는 기존 start/stop/closed 규격 그대로다."""
-    with stt["client"].websocket_connect("/ws") as ws:
+    """Streamlit/브라우저용 /ws/v1/stt/browser 는 기존 start/stop/closed 규격 그대로다."""
+    with stt["client"].websocket_connect(WS_BROWSER_PATH) as ws:
         ws.send_text(json.dumps({"type": "start", "engine": "sensevoice", "sample_rate": 16000}))
         assert ws.receive_json()["type"] == "ready"
         for frame in _utterance_frames():
@@ -267,3 +267,17 @@ def test_legacy_browser_ws_protocol_still_works(stt) -> None:
     closed = messages[-1]
     assert closed["text"] == " ".join(SCRIPT)
     assert {"summary", "utterances", "wav", "transcript", "session_id"} <= set(closed)
+
+
+def test_endpoints_live_under_versioned_base_paths(stt) -> None:
+    client = stt["client"]
+    assert (API_BASE, WS_STREAM_PATH, WS_BROWSER_PATH) == (
+        "/api/v1/stt", "/ws/v1/stt/stream", "/ws/v1/stt/browser"
+    )
+    assert client.get(f"{API_BASE}/health").json()["status"] == "ok"
+    assert "engines" in client.get(f"{API_BASE}/engines").json()
+    assert set(client.get(f"{API_BASE}/sessions").json()) == {"active", "saved"}
+    assert client.get(f"{API_BASE}/sessions/nope/transcript").status_code == 404
+    # 버전 없는 예전 경로는 더 이상 없다
+    for old in ("/", "/api/health", "/api/engines", "/api/sessions"):
+        assert client.get(old).status_code == 404, old

@@ -1,7 +1,7 @@
-"""External Backend 용 WebSocket 어댑터 — `/ws/stt`.
+"""External Backend 용 WebSocket 어댑터 — `/ws/v1/stt/stream`.
 
 STT 코어(StreamingSession → VAD → ASR → TranscriptMerger)는 그대로 두고,
-그 앞뒤의 입출력만 Backend 규격으로 바꾼다. 브라우저용 `/ws` 와 세션 생성/정리
+그 앞뒤의 입출력만 Backend 규격으로 바꾼다. 브라우저용 `/ws/v1/stt/browser` 와 세션 생성/정리
 헬퍼를 공유한다(`websocket.py`).
 
 프로토콜
@@ -62,7 +62,7 @@ _STOP = object()      # outbox sentinel: done 없이 종료(비정상 연결 끊
 
 
 def backend_config() -> StreamConfig:
-    """`/ws/stt` 세션 설정. Backend 요청이 아니라 서버 환경변수에서 정한다."""
+    """`/ws/v1/stt/stream` 세션 설정. Backend 요청이 아니라 서버 환경변수에서 정한다."""
     overrides: dict = {}
     raw = os.getenv("STT_CONFIG", "").strip()
     if raw:

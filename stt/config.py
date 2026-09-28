@@ -29,6 +29,13 @@ BACKEND_PORT = int(os.getenv("STT_BACKEND_PORT", "8000"))
 API_URL = os.getenv("STT_API_URL", f"http://127.0.0.1:{BACKEND_PORT}")
 WS_URL = os.getenv("STT_WS_URL", "")
 
+# ---------------------------------------------------------------- 엔드포인트 경로
+# REST 는 API_BASE, WebSocket 은 WS_BASE 아래에 둔다(서버·Streamlit·브라우저 공용).
+API_BASE = "/api/v1/stt"
+WS_BASE = "/ws/v1/stt"
+WS_STREAM_PATH = f"{WS_BASE}/stream"      # External Backend (PCM16 → transcript)
+WS_BROWSER_PATH = f"{WS_BASE}/browser"    # Streamlit 실시간 전사 페이지
+
 # ---------------------------------------------------------------- 경로
 ROOT = Path(__file__).resolve().parent.parent
 RECORDINGS_DIR = ROOT / "recordings"

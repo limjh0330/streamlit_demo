@@ -1,4 +1,4 @@
-"""WebSocket 엔드포인트 — 브라우저 <-> RunPod STT 백엔드.
+"""WebSocket 엔드포인트 `/ws/v1/stt/browser` — 브라우저 <-> RunPod STT 백엔드.
 
 프로토콜
 --------
@@ -16,7 +16,7 @@ server -> client (JSON 텍스트)
     {"type":"error",   "message":"..."}
     {"type":"closed",  "summary":{...}, "transcript":"...", "wav":"..."}
 
-External Backend 용 `/ws/stt` 는 `backend_ws.py` 에 있다. 세션 생성/정리와
+External Backend 용 `/ws/v1/stt/stream` 은 `backend_ws.py` 에 있다. 세션 생성/정리와
 이벤트 브리지는 아래 공용 헬퍼(`event_bridge`, `open_session`, `close_session`)를
 두 엔드포인트가 함께 쓴다.
 """
@@ -97,7 +97,7 @@ async def close_session(session: StreamingSession) -> tuple[dict, Path | None]:
     return summary, path
 
 
-# ---------------------------------------------------------------- /ws
+# ---------------------------------------------------------------- /ws/v1/stt/browser
 async def stt_endpoint(ws: WebSocket) -> None:
     await ws.accept()
     loop = asyncio.get_running_loop()
