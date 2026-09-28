@@ -8,7 +8,7 @@ import re
 import unicodedata
 from dataclasses import dataclass
 
-from ..transcript.medical_terms import find_terms
+from ..transcript.medical_terms import find_medical_accuracy_terms
 
 _PUNCT = re.compile(r"[^\w\s가-힣]", re.UNICODE)
 _SPACE = re.compile(r"\s+")
@@ -83,8 +83,10 @@ def cer(reference: str, hypothesis: str) -> float:
 
 def medical_term_accuracy(reference: str, hypothesis: str) -> dict:
     """정답에 등장한 도메인 용어를 가설이 얼마나 살렸는지(recall)."""
-    ref_terms = set(find_terms(reference))
-    hyp_terms = set(find_terms(hypothesis))
+    # 활력징후·통증점수는 별도 평가 항목이다. 이 값은 의학용어와 영문 약어
+    # 표기만을 대상으로 한 recall이다.
+    ref_terms = set(find_medical_accuracy_terms(reference))
+    hyp_terms = set(find_medical_accuracy_terms(hypothesis))
     if not ref_terms:
         return {"recall": None, "matched": 0, "total": 0, "missed": []}
     matched = ref_terms & hyp_terms

@@ -65,7 +65,7 @@ class StreamConfig:
     """세션 하나의 스트리밍 파라미터."""
 
     # ASR 엔진
-    engine: str = "whisper"               # whisper | zipformer | sensevoice
+    engine: str = "whisper"               # whisper | zipformer | sensevoice | funasr_mlt_nano
     model_size: str = "small"             # whisper 전용
     model_dir: str | None = None          # zipformer / sensevoice 모델 디렉터리
     device: str = field(default_factory=default_device)          # cpu | cuda
@@ -104,5 +104,5 @@ class StreamConfig:
         return d
 
 
-ENGINE_CHOICES = ("whisper", "zipformer", "sensevoice")
+ENGINE_CHOICES = ("whisper", "zipformer", "sensevoice", "funasr_mlt_nano")
 WHISPER_SIZES = ("tiny", "base", "small", "medium", "large-v3")

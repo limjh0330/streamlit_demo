@@ -11,7 +11,7 @@ from stt.config import TRANSCRIPTS_DIR
 from stt.metrics.evaluator import evaluate
 
 st.title("성능 비교")
-st.caption("Whisper / Zipformer / SenseVoice 를 같은 오디오로 돌린 뒤 지표를 비교합니다.")
+st.caption("Whisper / Zipformer / SenseVoice / Fun-ASR-MLT-Nano 를 같은 오디오로 돌린 뒤 지표를 비교합니다.")
 
 
 @st.cache_data(ttl="30s")

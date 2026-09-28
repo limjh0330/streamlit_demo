@@ -263,6 +263,11 @@ class TranscriptMerger:
         return join_words(self.unstable)
 
     @property
+    def current_text(self) -> str:
+        """아직 endpoint 전인 현재 발화 하나(확정 부분 + 흔들리는 꼬리)."""
+        return join_words(self.committed + self.unstable)
+
+    @property
     def full_text(self) -> str:
         return " ".join(p for p in (self.stable_text, self.partial_text) if p).strip()
 

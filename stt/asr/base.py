@@ -1,9 +1,9 @@
 """ASR 어댑터 공통 인터페이스.
 
-개발문서의 ASR Adapter 계층. Whisper / Zipformer / SenseVoice 를
+개발문서의 ASR Adapter 계층. Whisper / Zipformer / SenseVoice / Fun-ASR 를
 같은 인터페이스 뒤에 두어 세션 코드가 엔진에 의존하지 않게 한다.
 
-  - 윈도우형 엔진(Whisper, SenseVoice): `transcribe(audio, t0)` 로 구간을 통째로 인식
+  - 윈도우형 엔진(Whisper, SenseVoice, Fun-ASR): `transcribe(audio, t0)` 로 구간을 통째로 인식
   - 진짜 스트리밍 엔진(Zipformer): `accept_waveform()` + `partial()` 사용
 """
 from __future__ import annotations
@@ -116,4 +116,8 @@ def create_engine(config: StreamConfig) -> ASREngine:
         from .sensevoice import SenseVoiceEngine
 
         return SenseVoiceEngine(config)
+    if engine == "funasr_mlt_nano":
+        from .funasr_mlt_nano import FunASRMLTNanoEngine
+
+        return FunASRMLTNanoEngine(config)
     raise ValueError(f"알 수 없는 엔진: {config.engine!r}")

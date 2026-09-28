@@ -1,0 +1,5 @@
+﻿model,indexes_evaluated,indexes_with_medical_terms,hypotheses_present,wer_index_mean,cer_index_mean,wer_micro,cer_micro,medical_accuracy_index_mean,medical_accuracy_micro,medical_terms_matched,medical_terms_total
+funasr_mlt_nano,50,50,50,0.5454,0.4405,0.5426,0.4389,0.6502,0.6548,330,504
+sensevoice,50,50,50,0.6997,0.4673,0.6965,0.4655,0.3862,0.3968,200,504
+whisper,50,50,50,0.6190,0.4825,0.6143,0.4808,0.5222,0.5417,273,504
+zipformer,50,50,49,0.9670,0.9367,0.9643,0.9321,0.0098,0.0119,6,504

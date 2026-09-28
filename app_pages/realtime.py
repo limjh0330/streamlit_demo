@@ -70,7 +70,9 @@ with st.sidebar:
     engine = st.selectbox(
         "ASR 엔진",
         ENGINE_CHOICES,
-        format_func=lambda n: n if not info or n in ready else f"{n} (모델 없음)",
+        format_func=lambda n: (
+            "Fun-ASR-MLT-Nano-2512" if n == "funasr_mlt_nano" else n
+        ) if not info or n in ready else f"{n} (모델 없음)",
     )
     if info and engine not in ready:
         st.warning(info["engines"][engine]["detail"], icon=":material/warning:")
@@ -90,6 +92,13 @@ with st.sidebar:
     st.subheader("처리")
     correction = st.toggle("의료 용어 교정", True)
     save_wav = st.toggle("원본 WAV 저장", True)
+
+    if engine == "funasr_mlt_nano":
+        st.info(
+            "800M 다국어 모델입니다. 현재 타임스탬프가 없어 발화 전체를 재인식하며, "
+            "성능 비교에는 RTF·지연·WER/CER이 저장됩니다.",
+            icon=":material/info:",
+        )
 
 if info:
     st.caption(

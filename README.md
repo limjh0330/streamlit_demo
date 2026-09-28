@@ -33,14 +33,15 @@
 | **실시간 전사** | getUserMedia → AudioWorklet → WebSocket 으로 청크 전송 | streaming ASR → partial/final 을 WS 로 회신 |
 | **파일 전사** | `st.audio_input` / 파일 업로드 | 전체 오디오를 한 번에 전사 |
 
-ASR 백엔드는 어댑터로 분리되어 있어 같은 오디오로 세 엔진을 비교할 수 있습니다.
-셋 다 한국어를 지원하며, 엔진마다 오디오를 넣는 방식이 다릅니다.
+ASR 백엔드는 어댑터로 분리되어 있어 같은 오디오로 네 엔진을 비교할 수 있습니다.
+모두 한국어를 지원하며, 엔진마다 오디오를 넣는 방식이 다릅니다.
 
 | 엔진 | 패키지 | 오디오 공급 방식 | 특징 |
 |---|---|---|---|
 | **Whisper** | `faster-whisper` | 5 s sliding window + 1.5 s overlap | 정확도 baseline. autoregressive 라 느림 |
 | **Zipformer** | `sherpa-onnx` | 프레임 단위 `accept_waveform` | 진짜 streaming. 내장 endpoint 검출, 첫 partial 이 가장 빠름 |
 | **SenseVoice** | `sherpa-onnx` | 발화 전체를 0.8 s 마다 재인식 | non-autoregressive. RTF 0.02 로 매우 빠름 |
+| **Fun-ASR-MLT-Nano-2512** | `funasr` | 발화 전체를 0.8 s 마다 재인식 | 800M·31개 언어 다국어 ASR. 현재 타임스탬프 미지원 |
 
 SenseVoice 는 추론이 워낙 빨라 윈도우를 잘라 넣는 대신 **발화 전체를 매번 다시
 인식**합니다(`decodes_full_utterance`). 잘린 오디오를 인식할 때 생기는 오류와
@@ -65,6 +66,9 @@ Whisper 모델은 최초 실행 시 자동으로 받습니다. Zipformer / Sense
 ```bash
 python -m scripts.fetch_models        # 약 360 MB (int8)
 ```
+
+Fun-ASR-MLT-Nano-2512는 `funasr>=1.4.1` 설치 후 첫 전사 때 Hugging Face
+캐시에 자동으로 내려받습니다. 모델이 약 800M 파라미터이므로 GPU 실행을 권장합니다.
 
 | 디렉터리 | 릴리스 |
 |---|---|
@@ -126,7 +130,7 @@ streamlit run streamlit_app.py --server.port 8501
 
 ### 엔진 비교 (CLI)
 
-Streamlit 없이 같은 오디오를 세 엔진에 통과시켜 지표를 뽑습니다. 결과는
+Streamlit 없이 같은 오디오를 네 엔진에 통과시켜 지표를 뽑습니다. 결과는
 `transcripts/` 에 저장되어 **성능 비교** 페이지에 그대로 나타납니다.
 
 ```bash
@@ -174,7 +178,8 @@ streamlit_demo/
 │   │   ├── base.py           # ASREngine 인터페이스 + 팩토리
 │   │   ├── whisper.py        # faster-whisper
 │   │   ├── zipformer.py      # sherpa-onnx streaming
-│   │   └── sensevoice.py     # sherpa-onnx offline
+│   │   ├── sensevoice.py     # sherpa-onnx offline
+│   │   └── funasr_mlt_nano.py # Fun-ASR-MLT-Nano-2512 (FunASR)
 │   ├── transcript/
 │   │   ├── merger.py         # stable prefix / unstable suffix / overlap dedup
 │   │   └── medical_terms.py  # ER 용어 사전 + 후처리
@@ -184,7 +189,8 @@ streamlit_demo/
 │
 ├── server/
 │   ├── main.py               # FastAPI 앱 + REST (상태 조회)
-│   └── websocket.py          # /ws 엔드포인트 (오디오 인입 / 전사 회신)
+│   ├── websocket.py          # /ws 엔드포인트 (브라우저) + 세션 공용 헬퍼
+│   └── backend_ws.py         # /ws/stt 엔드포인트 (External Backend 어댑터)
 │
 ├── scripts/
 │   ├── fetch_models.py       # Zipformer / SenseVoice 모델 다운로드
@@ -248,7 +254,7 @@ window/overlap/지터 조합을 훑는 회귀 테스트로 고정해 두었습�
 | 엔진 | 병합기 진입점 | 이유 |
 |---|---|---|
 | Whisper, Zipformer | `update(words)` | 단어 타임스탬프가 있어 시각 기준 정렬이 가능 |
-| SenseVoice | `replace_text(text)` | 매번 발화 전체를 다시 인식하므로 최신 가설로 교체 |
+| SenseVoice, Fun-ASR-MLT-Nano | `replace_text(text)` | 매번 발화 전체를 다시 인식하므로 최신 가설로 교체 |
 | (타임스탬프 없는 윈도우형) | `update_text(text)` | 텍스트 겹침만 제거하고 한 윈도우 늦게 확정 |
 
 여기서 걸렸던 것들 — 모두 회귀 테스트로 고정했습니다.
@@ -329,6 +335,9 @@ RunPod GPU 인스턴스에서는 `stt/config.py` 의 `default_device()` 가 CUDA
 
 ## 6. WebSocket 프로토콜
 
+브라우저/Streamlit 용 `/ws` 규격입니다. External Backend 는 아래
+[Backend WebSocket API](#backend-websocket-api) 의 `/ws/stt` 를 쓰세요.
+
 ```jsonc
 // client → server
 {"type":"start","engine":"whisper","model_size":"small","language":"ko",
@@ -344,6 +353,127 @@ RunPod GPU 인스턴스에서는 `stt/config.py` 의 `default_device()` 가 CUDA
 {"type":"closed",  "summary":{...}, "text":"...", "transcript":"...", "wav":"..."}
 ```
 
+## Backend WebSocket API
+
+External Backend 가 STT 서버에 붙는 인터페이스입니다. STT 서버는 **Audio →
+Transcript** 까지만 책임지며 conversation/turn 번호, KTAS 판단, LLM 호출, 화자
+역할(환자/의료진) 추정은 하지 않습니다. 연결 하나 = 오디오 스트림 하나이고,
+Backend 가 연결과 예진 세션(UUID)을 스스로 매핑합니다.
+
+### Endpoint
+
+```
+ws://<host>:8000/ws/stt
+wss://<podId>-8000.proxy.runpod.net/ws/stt       # RunPod
+```
+
+선택: `?triage_session_id=<uuid>` 를 붙이면 서버 **로그에만** 함께 남습니다
+(STT 내부 세션 ID 와는 별개이며 응답에는 포함되지 않습니다).
+
+### Backend → STT
+
+**Binary** — 오디오
+
+| 항목 | 값 |
+|---|---|
+| format | raw PCM, signed **PCM16**, **little-endian** |
+| sample rate | **16 kHz** |
+| channels | **mono** |
+| chunk | **100 ms** = 1,600 samples = **3,200 bytes** |
+
+- 3200 B 가 아닌 프레임도 받습니다(경고 로그). 홀수 길이로 샘플이 쪼개지면
+  남는 바이트를 다음 프레임에 이어 붙입니다.
+- 빈 프레임은 무시합니다. 1 s(32,000 B)를 넘는 프레임은 버리고
+  `{"type":"error","message":"Invalid audio frame"}` 를 보냅니다. 연결은 유지됩니다.
+
+**Close** — 오디오 전송 종료 (text frame)
+
+```
+close
+```
+
+`close` 를 받으면 남은 오디오 → ASR 디코더 → TranscriptMerger 를 flush 하고,
+남은 final 을 모두 보낸 뒤 **마지막에** `done` 을 보내고 연결을 닫습니다(1000).
+
+### STT → Backend
+
+**Partial** — 현재 발화의 중간 결과. 화면 표시용이며 DB 저장용이 아닙니다.
+직전과 같은 텍스트는 다시 보내지 않습니다.
+
+```json
+{"type": "transcript", "text": "가슴이", "is_final": false}
+```
+
+**Final** — 발화 하나의 확정 결과. Backend 의 conversation row 하나에 해당합니다.
+
+```json
+{"type": "transcript", "text": "가슴이 답답해요", "is_final": true,
+ "start_time": 12.4, "end_time": 15.6}
+```
+
+`start_time` / `end_time` 은 선택 필드로, **이 연결에 들어온 오디오 기준 초**입니다
+(`STT_TIMESTAMPS=0` 이면 빠집니다). SenseVoice/Fun-ASR 은 발화 단위 시각입니다.
+
+**Error**
+
+```json
+{"type": "error", "message": "..."}
+```
+
+| message | 상황 | 이후 |
+|---|---|---|
+| `STT engine initialization failed` | 모델 로드 실패 | 연결 종료 (1011) |
+| `STT inference failed` | 추론 중 오류 (초당 최대 1회) | 계속 동작 |
+| `Invalid audio frame` | 1 s 초과 프레임 | 해당 프레임만 버림 |
+| `Unknown control message` | `close` 가 아닌 text frame | 계속 동작 |
+| `Internal STT server error` | 예기치 못한 서버 오류 | 연결 종료 (1011) |
+
+traceback·파일 경로·예외 내용은 서버 로그에만 남습니다.
+
+**Done** — flush 가 끝났다는 신호. 항상 마지막 메시지입니다.
+
+```json
+{"type": "done"}
+```
+
+### 흐름 예시
+
+```
+Backend                                STT
+  ── connect /ws/stt ─────────────────▶
+  ── <3200 B> <3200 B> <3200 B> … ────▶
+  ◀── {"type":"transcript","text":"가슴이","is_final":false}
+  ◀── {"type":"transcript","text":"가슴이 답답해요","is_final":false}
+  ◀── {"type":"transcript","text":"가슴이 답답해요","is_final":true,…}
+  ── <3200 B> … ──────────────────────▶
+  ── "close" ─────────────────────────▶
+  ◀── {"type":"transcript","text":"(남은 발화)","is_final":true,…}
+  ◀── {"type":"done"}
+  ◀── close(1000)
+```
+
+Backend 가 `close` 없이 끊으면 STT 는 flush·WAV/전사 저장·세션 정리만 하고
+아무것도 보내지 않습니다.
+
+### 서버 설정
+
+엔진·윈도우 같은 ASR 설정은 Backend 가 보내지 않고 STT 서버 환경변수로 정합니다.
+엔진을 바꿔도 Backend 프로토콜은 그대로입니다.
+
+| 환경변수 | 예 | 의미 |
+|---|---|---|
+| `STT_ENGINE` | `sensevoice` | `whisper` · `zipformer` · `sensevoice` · `funasr_mlt_nano` |
+| `STT_MODEL_SIZE` | `small` | Whisper 모델 크기 |
+| `STT_CONFIG` | `{"silence_sec":0.6,"save_wav":false}` | `StreamConfig` 필드 덮어쓰기 (JSON) |
+| `STT_TIMESTAMPS` | `1` | final 에 `start_time`/`end_time` 포함 (기본 1) |
+
+```bash
+STT_ENGINE=sensevoice python -m server.main --host 0.0.0.0 --port 8000
+```
+
+연결마다 엔진을 새로 로드하므로(브라우저 `/ws` 와 같음) 첫 오디오가 모델 로드
+시간만큼 늦게 처리될 수 있습니다. 그동안 보낸 프레임은 버려지지 않고 처리됩니다.
+
 ## 7. 개발 순서 대비 현황
 
 | 단계 | 상태 |
@@ -355,4 +485,197 @@ RunPod GPU 인스턴스에서는 `stt/config.py` 의 `default_device()` 가 CUDA
 | 4. Metrics logging (RTF, latency, 자원 사용) | 구현 완료 |
 | 5. Zipformer backend (sherpa-onnx, native streaming, endpoint) | 구현 완료 · 한국어 모델 연결 |
 | 6. SenseVoice backend (발화 전체 재인식) | 구현 완료 · 한국어 모델 연결 |
-| 7. 동일 의료 데이터셋 비교 | 비교 화면 + `scripts/benchmark.py` 완료 · **데이터셋 필요** |
+
+## 8. API 사용 방법
+
+STT 서버를 다른 서비스에서 API 로 쓰는 방법입니다. 실시간 전사는 WebSocket
+`/ws/stt`, 상태·결과 조회는 REST `/api/*` 를 씁니다. 메시지 규격의 세부 사항은
+[Backend WebSocket API](#backend-websocket-api) 를 참고하세요.
+
+### 8.1 서버 실행
+
+```bash
+source .venv/bin/activate
+STT_ENGINE=sensevoice python -m server.main --host 0.0.0.0 --port 8000
+```
+
+엔진은 서버 쪽 환경변수로 고릅니다(`STT_ENGINE`, `STT_MODEL_SIZE`, `STT_CONFIG`).
+클라이언트는 엔진을 몰라도 되고, 엔진을 바꿔도 클라이언트 코드는 그대로입니다.
+
+### 8.2 엔드포인트
+
+| 종류 | 경로 | 용도 |
+|---|---|---|
+| WebSocket | `/ws/stt` | **외부 서비스용 실시간 전사** (PCM16 → transcript) |
+| WebSocket | `/ws` | Streamlit/브라우저 UI 전용 (6장 규격) — 외부 연동에는 쓰지 마세요 |
+| GET | `/api/health` | 서버 상태, 활성 세션 수 |
+| GET | `/api/engines` | 엔진별 설치·모델 준비 상태, 기본 설정 |
+| GET | `/api/sessions` | 활성 세션 / 저장된 세션 ID 목록(최근 50개) |
+| GET | `/api/sessions/{session_id}/transcript` | 저장된 전사 결과(JSON) |
+| GET | `/api/sessions/{session_id}/audio` | 저장된 녹음(WAV) |
+
+### 8.3 상태 확인
+
+```bash
+curl http://localhost:8000/api/health
+# {"status":"ok","sample_rate":16000,"active_sessions":[],"gpu_memory_mb":null}
+
+curl http://localhost:8000/api/engines
+# {"engines":{"whisper":{"ready":true,...},"sensevoice":{"ready":true,...}, ...},
+#  "whisper_sizes":[...], "defaults":{...}}
+```
+
+배포 후 헬스체크나 준비 상태 확인(readiness probe)에는 `/api/health` 를 쓰면 됩니다.
+
+### 8.4 오디오 준비
+
+`/ws/stt` 는 **헤더 없는 raw PCM16 / little-endian / 16 kHz / mono** 만 받습니다.
+WAV 파일이라면 헤더를 떼고 샘플만 보내야 합니다.
+
+```bash
+# 임의의 오디오 → raw PCM (ffmpeg)
+ffmpeg -i input.m4a -ac 1 -ar 16000 -f s16le sample.pcm
+```
+
+```python
+# 16 kHz / mono / 16-bit WAV → raw PCM (Python 표준 라이브러리)
+import wave
+with wave.open("sample.wav") as wf:
+    pcm = wf.readframes(wf.getnframes())
+```
+
+마이크 입력을 중계할 때도 같은 형식으로 100 ms(3,200 bytes) 단위로 보내면 됩니다.
+
+### 8.5 Python 클라이언트
+
+`websockets` 패키지를 씁니다(`uvicorn[standard]` 설치 시 함께 설치됨).
+
+```python
+import asyncio
+import json
+import sys
+import wave
+
+import websockets
+
+URL = "ws://localhost:8000/ws/stt"
+FRAME_BYTES = 3200                     # 100 ms = 1600 samples × 2 bytes
+
+
+async def stream(path: str) -> list[str]:
+    with wave.open(path) as wf:
+        assert (wf.getframerate(), wf.getnchannels(), wf.getsampwidth()) == (16000, 1, 2)
+        pcm = wf.readframes(wf.getnframes())
+
+    finals: list[str] = []
+    async with websockets.connect(URL) as ws:
+
+        async def send_audio() -> None:
+            for i in range(0, len(pcm), FRAME_BYTES):
+                await ws.send(pcm[i:i + FRAME_BYTES])   # bytes → binary frame
+                await asyncio.sleep(0.1)                # 실시간 속도로 전송
+            await ws.send("close")                      # str → text frame
+
+        sender = asyncio.create_task(send_audio())
+        async for raw in ws:
+            msg = json.loads(raw)
+            if msg["type"] == "transcript":
+                if msg["is_final"]:
+                    finals.append(msg["text"])          # ← DB 저장 대상
+                    print("[final]  ", msg["text"], msg.get("start_time"), msg.get("end_time"))
+                else:
+                    print("[partial]", msg["text"])     # ← 화면 표시용
+            elif msg["type"] == "error":
+                print("[error]  ", msg["message"])
+            elif msg["type"] == "done":                 # 마지막 메시지
+                break
+        await sender
+    return finals
+
+
+if __name__ == "__main__":
+    print(asyncio.run(stream(sys.argv[1])))
+```
+
+```text
+$ python stt_client.py recordings/sample.wav
+[partial] 오늘 아침부터.
+[partial] 오늘 아침 부터 배가 아팠 습니다.
+...
+[final]   오늘 아침부터 배가 아팠습니다 구토도 두 번습니다 열도 조금 났습니다. 0.0 6.1
+['오늘 아침부터 배가 아팠습니다 구토도 두 번습니다 열도 조금 났습니다.']
+```
+
+### 8.6 Node.js 클라이언트
+
+Node 22 이상은 `WebSocket` 이 내장돼 있어 추가 패키지가 필요 없습니다
+(그 이하 버전은 `ws` 패키지를 쓰세요).
+
+```js
+// node stt_client.mjs sample.pcm
+import { readFileSync } from "node:fs";
+
+const URL = "ws://localhost:8000/ws/stt";
+const FRAME_BYTES = 3200;                        // 100 ms
+const pcm = readFileSync(process.argv[2]);       // raw PCM16 LE / 16 kHz / mono
+
+const ws = new WebSocket(URL);
+ws.binaryType = "arraybuffer";
+
+ws.onopen = async () => {
+  for (let i = 0; i < pcm.length; i += FRAME_BYTES) {
+    ws.send(pcm.subarray(i, i + FRAME_BYTES));   // binary frame
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  ws.send("close");                              // text frame
+};
+
+ws.onmessage = ({ data }) => {
+  const msg = JSON.parse(data);
+  if (msg.type === "transcript") {
+    console.log(msg.is_final ? "[final]  " : "[partial]", msg.text);
+  } else if (msg.type === "error") {
+    console.error("[error]  ", msg.message);
+  } else if (msg.type === "done") {
+    ws.close();
+  }
+};
+```
+
+### 8.7 연동 시 지켜야 할 것
+
+- **연결 하나 = 오디오 스트림 하나.** 예진 세션을 시작할 때 연결을 열고 끝날 때
+  닫습니다. 여러 세션의 오디오를 한 연결에 섞지 마세요. 로그 추적이 필요하면
+  `?triage_session_id=<uuid>` 를 붙입니다(응답에는 포함되지 않습니다).
+- **final 만 저장합니다.** `is_final: true` 하나가 발화 하나(= conversation row
+  하나)입니다. partial 은 같은 발화의 중간 결과라 계속 바뀌므로 화면 표시에만 씁니다.
+- **`close` 를 보낸 뒤 `done` 을 받을 때까지 연결을 유지하세요.** 마지막 발화의
+  final 은 `close` 이후에 나옵니다. `done` 전에 끊으면 마지막 발화를 잃습니다.
+- **연결 직후에는 모델 로드 시간만큼 응답이 늦을 수 있습니다.** 그동안 보낸
+  오디오는 버려지지 않으므로 기다리지 않고 바로 보내도 됩니다.
+- **실시간 속도로 보내는 것을 권장합니다.** 파일을 한 번에 밀어 넣어도 전사는
+  되지만 서버 큐에 쌓여 partial 이 늦게 몰려 옵니다.
+- **`start_time` / `end_time` 은 연결 기준 상대 시각(초)입니다.** 재연결하면
+  0 부터 다시 셉니다. 절대 시각이 필요하면 Backend 가 연결 시작 시각을 더하세요.
+- **오류 처리.** `STT engine initialization failed` 나 `Internal STT server error`
+  를 받으면 서버가 연결을 끊으므로(1011) 새로 연결합니다. 나머지 오류는 연결이
+  유지되니 기록만 하고 계속 보내면 됩니다.
+
+### 8.8 전사·녹음 조회 (REST)
+
+세션이 끝나면 서버가 전사 결과와 녹음을 `transcripts/`, `recordings/` 에
+저장합니다(`STT_CONFIG='{"save_wav":false}'` 이면 녹음은 생략). 여기서 쓰는
+`session_id` 는 STT 서버 내부 ID 라 `/ws/stt` 응답에는 나오지 않으므로,
+`/api/sessions` 목록에서 찾아 운영·디버깅 용도로 씁니다.
+
+```bash
+curl http://localhost:8000/api/sessions
+# {"active":[],"saved":["20260927-172618-6ed053", ...]}
+
+curl http://localhost:8000/api/sessions/20260927-172618-6ed053/transcript
+# {"session_id":"...","engine":"sensevoice","stable":"...",
+#  "utterances":[{"text":"...","start":0.0,"end":6.1}],
+#  "metrics":{"rtf_mean":...,"first_partial_ms":...}, "wav":"...", "error":null}
+
+curl -o session.wav http://localhost:8000/api/sessions/20260927-172618-6ed053/audio
+```

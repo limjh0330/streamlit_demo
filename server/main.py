@@ -3,6 +3,7 @@
     python -m server.main --host 0.0.0.0 --port 8000
 
 브라우저는 `/ws` 로 PCM16 오디오를 밀어넣고 partial/final 전사를 받는다.
+External Backend 는 `/ws/stt` 로 붙는다(규격은 `server/backend_ws.py`).
 Streamlit 은 `/api/*` 로 상태만 조회한다(같은 인스턴스이므로 localhost).
 
 RunPod 프록시가 TLS 를 끝내주므로 여기서는 평문 HTTP 로 띄우면 된다.
@@ -26,6 +27,7 @@ from stt.config import (
 )
 from stt.metrics.latency import gpu_memory_mb
 
+from .backend_ws import backend_stt_endpoint
 from .websocket import SESSIONS, stt_endpoint
 
 logging.basicConfig(
@@ -38,6 +40,11 @@ app = FastAPI(title="ER STT Backend", version="2.0")
 @app.websocket("/ws")
 async def websocket_route(ws: WebSocket) -> None:
     await stt_endpoint(ws)
+
+
+@app.websocket("/ws/stt")
+async def backend_websocket_route(ws: WebSocket) -> None:
+    await backend_stt_endpoint(ws)
 
 
 @app.get("/")
@@ -61,6 +68,13 @@ async def engines() -> dict:
                 import faster_whisper  # noqa: F401
 
                 available[name] = {"ready": True, "detail": "faster-whisper"}
+            elif name == "funasr_mlt_nano":
+                import funasr  # noqa: F401
+
+                available[name] = {
+                    "ready": True,
+                    "detail": "funasr (모델은 첫 실행 시 Hugging Face에서 다운로드)",
+                }
             else:
                 import sherpa_onnx  # noqa: F401
 

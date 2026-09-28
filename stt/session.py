@@ -6,7 +6,7 @@
                 ↓   (워커 스레드)
             VAD / Endpoint
                 ↓
-            Sliding Window Buffer      (Whisper / SenseVoice)
+            Sliding Window Buffer      (Whisper / SenseVoice / Fun-ASR)
               또는 accept_waveform      (Zipformer)
                 ↓
             ASR Engine
@@ -113,12 +113,20 @@ class StreamingSession:
         if self.engine.decodes_full_utterance:
             # 발화 전체를 매번 다시 인식하는 엔진: 윈도우를 최대 발화 길이만큼
             # 열어 두고(= 잘라내지 않고) refresh_sec 마다 갱신한다.
+            # Fun-ASR-MLT-Nano is substantially larger than SenseVoice.  On
+            # CPU, a 0.8-s refresh can take longer than the refresh period and
+            # continuously grow the input queue.  A five-second update keeps
+            # its partials live while leaving enough compute headroom.
+            refresh_sec = max(
+                self.config.refresh_sec,
+                5.0 if self.engine.name == "funasr_mlt_nano" else 0.0,
+            )
             self.buffer = SlidingWindowBuffer(
                 window_sec=self.config.max_utterance_sec,
                 overlap_sec=0.0,
                 min_window_sec=self.config.min_window_sec,
                 first_hop_sec=self.config.first_hop_sec,
-                hop_sec=self.config.refresh_sec,
+                hop_sec=refresh_sec,
             )
 
         if self.config.save_wav:
@@ -206,7 +214,7 @@ class StreamingSession:
                 last_metrics = now
                 self._emit(Event("metrics", self.metrics()))
 
-    # --- Whisper / SenseVoice: sliding window ------------------------------
+    # --- Whisper / SenseVoice / Fun-ASR: sliding window --------------------
     def _step_windowed(self, block: np.ndarray, endpoint: bool) -> None:
         self.buffer.push(block)
         if endpoint:
@@ -289,6 +297,8 @@ class StreamingSession:
                         "stable": self._post(self.merger.stable_text),
                         "partial": self._post(partial),
                         "committed": self._post(committed),
+                        # 현재 발화만의 텍스트(stable 은 지난 발화까지 포함한다)
+                        "utterance": self._post(self.merger.current_text),
                     },
                 )
             )

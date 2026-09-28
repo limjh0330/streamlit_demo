@@ -15,16 +15,22 @@ server -> client (JSON 텍스트)
     {"type":"metrics", "rtf_mean":.., "first_partial_ms":.., ...}
     {"type":"error",   "message":"..."}
     {"type":"closed",  "summary":{...}, "transcript":"...", "wav":"..."}
+
+External Backend 용 `/ws/stt` 는 `backend_ws.py` 에 있다. 세션 생성/정리와
+이벤트 브리지는 아래 공용 헬퍼(`event_bridge`, `open_session`, `close_session`)를
+두 엔드포인트가 함께 쓴다.
 """
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
+from pathlib import Path
+from typing import Callable
 
 from fastapi import WebSocket, WebSocketDisconnect
 
-from stt.config import SAMPLE_RATE, StreamConfig
+from stt.config import SAMPLE_RATE, TRANSCRIPTS_DIR, StreamConfig
 from stt.session import Event, StreamingSession
 
 log = logging.getLogger("stt.ws")
@@ -48,17 +54,57 @@ def _config_from(payload: dict) -> StreamConfig:
     return cfg
 
 
+# ---------------------------------------------------------------- 공용 헬퍼
+def event_bridge(
+    loop: asyncio.AbstractEventLoop,
+) -> tuple[asyncio.Queue, Callable[[Event], None]]:
+    """(outbox, on_event). 워커 스레드의 이벤트를 이벤트 루프 큐로 넘긴다."""
+    outbox: asyncio.Queue = asyncio.Queue()
+
+    def on_event(event: Event) -> None:
+        loop.call_soon_threadsafe(outbox.put_nowait, event)
+
+    return outbox, on_event
+
+
+async def open_session(
+    config: StreamConfig, on_event: Callable[[Event], None]
+) -> StreamingSession:
+    """세션 생성 + 모델 로드 + warmup. 실패하면 워커까지 정리하고 다시 던진다."""
+    session = StreamingSession(config, on_event=on_event)
+    try:
+        # 모델 로드는 수 초 걸릴 수 있으므로 이벤트 루프를 막지 않는다
+        await asyncio.to_thread(session.start)
+        await asyncio.to_thread(session.engine.warmup)
+    except Exception:
+        await asyncio.to_thread(session.stop)
+        raise
+    SESSIONS[session.session_id] = session
+    return session
+
+
+async def close_session(session: StreamingSession) -> tuple[dict, Path | None]:
+    """잔여 오디오 flush → recorder 정리 → 전사 저장. (summary, 전사 경로)."""
+    try:
+        summary = await asyncio.to_thread(session.stop)
+        try:
+            path = await asyncio.to_thread(session.save_transcript, TRANSCRIPTS_DIR)
+        except Exception:
+            log.exception("transcript save failed: %s", session.session_id)
+            path = None
+    finally:
+        SESSIONS.pop(session.session_id, None)
+    return summary, path
+
+
+# ---------------------------------------------------------------- /ws
 async def stt_endpoint(ws: WebSocket) -> None:
     await ws.accept()
     loop = asyncio.get_running_loop()
-    outbox: asyncio.Queue[Event] = asyncio.Queue()
+    outbox, on_event = event_bridge(loop)
     session: StreamingSession | None = None
     sender: asyncio.Task | None = None
     session_sample_rate = SAMPLE_RATE
-
-    def on_event(event: Event) -> None:
-        """워커 스레드에서 호출되므로 이벤트 루프로 안전하게 넘긴다."""
-        loop.call_soon_threadsafe(outbox.put_nowait, event)
 
     async def pump() -> None:
         while True:
@@ -99,18 +145,15 @@ async def stt_endpoint(ws: WebSocket) -> None:
                     continue
                 session_sample_rate = int(payload.get("sample_rate") or SAMPLE_RATE)
                 config = _config_from(payload)
-                session = StreamingSession(config, on_event=on_event)
-                sender = asyncio.create_task(pump())
+                if sender is None:
+                    sender = asyncio.create_task(pump())
                 try:
-                    # 모델 로드는 수 초 걸릴 수 있으므로 이벤트 루프를 막지 않는다
-                    await asyncio.to_thread(session.start)
-                    await asyncio.to_thread(session.engine.warmup)
+                    session = await open_session(config, on_event)
                 except Exception as e:
                     await ws.send_text(json.dumps({"type": "error", "message": str(e)},
                                                   ensure_ascii=False))
                     session = None
                     continue
-                SESSIONS[session.session_id] = session
                 log.info("session started: %s (%s)", session.session_id, config.engine)
 
             elif kind == "stop":
@@ -130,8 +173,7 @@ async def stt_endpoint(ws: WebSocket) -> None:
             pass
     finally:
         if session is not None:
-            summary = await asyncio.to_thread(session.stop)
-            path = await asyncio.to_thread(session.save_transcript)
+            summary, path = await close_session(session)
             try:
                 await ws.send_text(
                     json.dumps(
@@ -149,7 +191,6 @@ async def stt_endpoint(ws: WebSocket) -> None:
                 )
             except Exception:
                 pass
-            SESSIONS.pop(session.session_id, None)
             log.info("session closed: %s", session.session_id)
         if sender is not None:
             sender.cancel()

@@ -13,7 +13,7 @@ from stt.asr.base import ASREngine, ASRResult, Word
 from stt.config import SAMPLE_RATE, StreamConfig
 from stt.metrics.evaluator import cer, evaluate, levenshtein, wer
 from stt.session import StreamingSession
-from stt.transcript.medical_terms import correct
+from stt.transcript.medical_terms import correct, find_medical_accuracy_terms
 from stt.transcript.merger import TranscriptMerger
 
 GROUND_TRUTH = (
@@ -259,6 +259,14 @@ def test_error_rates() -> None:
     ops = levenshtein(list("abc"), list("axcd"))
     assert (ops.substitutions, ops.insertions, ops.deletions) == (1, 1, 0)
     scores = evaluate("복통과 구토가 있었습니다", "복통과 구토가 있었습니다")
+    assert scores["medical"]["recall"] == 1.0
+
+
+def test_medical_accuracy_uses_medical_and_english_categories_only() -> None:
+    # 통증점수 전용 라벨은 이 지표의 대상이 아니며, 한글 낭독 약어는 canonical
+    # 영문 약어와 동일한 항목으로 집계한다.
+    assert not find_medical_accuracy_terms("통증점수")
+    scores = evaluate("엔알에스와 복통이 있습니다", "NRS와 복통이 있습니다")
     assert scores["medical"]["recall"] == 1.0
 
 

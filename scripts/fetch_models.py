@@ -1,10 +1,12 @@
-"""Zipformer / SenseVoice 모델을 내려받아 models/ 아래에 배치한다.
+"""ASR 모델을 내려받아 ``models/`` 아래에 배치한다.
 
-    python -m scripts.fetch_models              # 둘 다, int8 만 (권장)
+    python -m scripts.fetch_models              # 모두 받기
     python -m scripts.fetch_models zipformer    # 하나만
     python -m scripts.fetch_models --keep all   # fp32 까지 (GPU 권장)
 
 faster-whisper 는 최초 실행 시 자동으로 받으므로 여기서 다루지 않는다.
+Fun-ASR-MLT-Nano-2512는 Hugging Face snapshot을 ``models/funasr_mlt_nano``
+에 저장한다. (약 2 GB)
 """
 from __future__ import annotations
 
@@ -33,6 +35,9 @@ MODELS = {
         ("*.int8.onnx", "tokens.txt"),
     ),
 }
+
+FUNASR_MLT_NANO_ID = "FunAudioLLM/Fun-ASR-MLT-Nano-2512"
+FUNASR_MLT_NANO = "funasr_mlt_nano"
 
 #: int8 여부와 무관하게 항상 남기는 것
 ALWAYS_KEEP = ("tokens.txt", "bpe.model", "LICENSE")
@@ -112,19 +117,47 @@ def fetch(name: str, keep_all: bool, force: bool) -> None:
     print(f"  {kept} 개 파일, {total / 1e6:.0f} MB → {target}")
 
 
+def fetch_funasr_mlt_nano(force: bool) -> None:
+    """Download the official Hugging Face snapshot directly into ``models/``."""
+    target = MODELS_DIR / FUNASR_MLT_NANO
+    if target.is_dir() and (target / "model.pt").is_file() and not force:
+        print(f"[{FUNASR_MLT_NANO}] 이미 있습니다: {target}  (--force 로 다시 받기)")
+        return
+    try:
+        from huggingface_hub import snapshot_download
+    except ImportError as e:  # pragma: no cover - requirements include this indirectly
+        raise RuntimeError("huggingface_hub가 필요합니다: pip install huggingface_hub") from e
+
+    print(f"[{FUNASR_MLT_NANO}] https://huggingface.co/{FUNASR_MLT_NANO_ID}")
+    # ``local_dir`` makes the project model directory the source of truth rather
+    # than an opaque cache path.  The model contains remote code used by FunASR,
+    # so no file filters may be applied.
+    snapshot_download(
+        repo_id=FUNASR_MLT_NANO_ID,
+        local_dir=target,
+        force_download=force,
+    )
+    total = sum(p.stat().st_size for p in target.rglob("*") if p.is_file())
+    print(f"  {total / 1e6:.0f} MB → {target}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("models", nargs="*", choices=list(MODELS),
+    choices = [*MODELS, FUNASR_MLT_NANO]
+    parser.add_argument("models", nargs="*", choices=choices,
                         help="받을 모델 (기본: 전부)")
     parser.add_argument("--keep", choices=["int8", "all"], default="int8",
                         help="int8 만 남길지, fp32 까지 남길지 (기본: int8)")
     parser.add_argument("--force", action="store_true", help="이미 있어도 다시 받기")
     args = parser.parse_args()
 
-    for name in args.models or list(MODELS):
+    for name in args.models or choices:
         try:
-            fetch(name, keep_all=args.keep == "all", force=args.force)
+            if name == FUNASR_MLT_NANO:
+                fetch_funasr_mlt_nano(force=args.force)
+            else:
+                fetch(name, keep_all=args.keep == "all", force=args.force)
         except Exception as e:
             print(f"[{name}] 실패: {type(e).__name__}: {e}", file=sys.stderr)
             return 1
