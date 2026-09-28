@@ -13,7 +13,7 @@ from pathlib import Path
 
 import streamlit as st
 
-from stt.config import WS_BROWSER_PATH
+from stt.config import DEFAULT_ENGINE, WS_BROWSER_PATH
 
 _DIR = Path(__file__).resolve().parent
 
@@ -32,7 +32,7 @@ def live_mic(
     ws_url: str = "",
     backend_port: int = 8000,
     chunk_ms: int = 100,
-    engine: str = "whisper",
+    engine: str = DEFAULT_ENGINE,
     model_size: str = "small",
     language: str | None = "ko",
     window_sec: float = 5.0,

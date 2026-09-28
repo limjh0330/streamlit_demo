@@ -52,8 +52,7 @@ with st.sidebar:
     api_url = st.text_input("REST 주소 (Python → 백엔드)", API_URL)
     ws_url = st.text_input(
         "WebSocket 주소 (브라우저 → 백엔드)",
-        WS_BROWSER_PATH,
-    WS_URL,
+        WS_URL,
         placeholder=f"비우면 주소창에서 유도 (포트 {BACKEND_PORT})",
         help="RunPod 은 포트마다 호스트가 달라 자동 유도합니다. "
         f"다르게 노출했다면 wss://…{WS_BROWSER_PATH} 를 직접 적으세요.",
@@ -73,6 +72,7 @@ with st.sidebar:
     engine = st.selectbox(
         "ASR 엔진",
         ENGINE_CHOICES,
+        index=ENGINE_CHOICES.index(defaults.engine),
         format_func=lambda n: (
             "Fun-ASR-MLT-Nano-2512" if n == "funasr_mlt_nano" else n
         ) if not info or n in ready else f"{n} (모델 없음)",

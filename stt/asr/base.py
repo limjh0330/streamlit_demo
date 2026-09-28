@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from ..config import SAMPLE_RATE, StreamConfig
+from ..config import DEFAULT_ENGINE, SAMPLE_RATE, StreamConfig
 
 
 @dataclass
@@ -103,7 +103,7 @@ class ASREngine(ABC):
 
 def create_engine(config: StreamConfig) -> ASREngine:
     """config.engine 이름으로 어댑터를 생성한다."""
-    engine = (config.engine or "whisper").lower()
+    engine = (config.engine or DEFAULT_ENGINE).lower()
     if engine == "whisper":
         from .whisper import WhisperEngine
 

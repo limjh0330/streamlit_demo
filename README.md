@@ -94,7 +94,8 @@ Whisper 는 첫 실행 때 Hugging Face 캐시(`~/.cache/huggingface`)로 자동
 ### 2.3 실행
 
 ```bash
-# STT 서버 (API) — 엔진은 환경변수로 선택
+# STT 서버 (API) — 기본 엔진은 Fun-ASR-MLT-Nano. 다른 엔진은 STT_ENGINE 으로 선택
+python -m server.main --host 0.0.0.0 --port 8000
 STT_ENGINE=sensevoice python -m server.main --host 0.0.0.0 --port 8000
 
 # Streamlit UI (선택)
@@ -123,7 +124,7 @@ curl http://localhost:8000/api/v1/stt/engines     # 엔진별 준비 상태
 | `whisper` | faster-whisper `tiny`~`large-v3` (기본 `small`) | `faster-whisper` | HF 캐시 (자동 다운로드) | sliding window 5 s / overlap 1.5 s | 있음 | CPU(small 까지) / GPU |
 | `zipformer` | sherpa-onnx streaming zipformer korean 2024-06-16 | `sherpa-onnx` | `models/zipformer/` (127 MB, int8) | 100 ms 블록 native streaming | 있음 (토큰 기반) | CPU |
 | `sensevoice` | sherpa-onnx SenseVoice zh-en-ja-ko-yue 2024-07-17 | `sherpa-onnx` | `models/sensevoice/` (229 MB, int8) | 발화 전체를 0.8 s 마다 재인식 | 없음 (균등 분할 추정) | CPU / GPU |
-| `funasr_mlt_nano` | FunAudioLLM/Fun-ASR-MLT-Nano-2512 | `funasr`, `torch` | `models/funasr_mlt_nano/` (1.9 GB) | 발화 전체를 **5 s** 마다 재인식 | 없음 | **GPU** |
+| `funasr_mlt_nano` **(기본)** | FunAudioLLM/Fun-ASR-MLT-Nano-2512 | `funasr`, `torch` | `models/funasr_mlt_nano/` (1.9 GB) | 발화 전체를 **5 s** 마다 재인식 | 없음 | **GPU** |
 
 모든 엔진은 `stt/asr/base.py` 의 `ASREngine` 을 구현하며, 세션은 아래 세 속성만 보고 처리 경로를 고릅니다.
 
@@ -162,7 +163,7 @@ curl http://localhost:8000/api/v1/stt/engines     # 엔진별 준비 상태
   final 의 `start_time`/`end_time` 은 발화 단위로만 신뢰하세요.
 - 다국어(zh/en/ja/ko/yue) 모델이며 `language` 로 언어를 지정합니다. ITN(숫자 정규화) 사용.
 
-### 3.5 Fun-ASR-MLT-Nano-2512 (`stt/asr/funasr_mlt_nano.py`)
+### 3.5 Fun-ASR-MLT-Nano-2512 (`stt/asr/funasr_mlt_nano.py`) — 기본 엔진
 
 - FunASR `AutoModel.generate` 를 쓰는 LLM 기반 다국어 ASR 입니다
   (`models/funasr_mlt_nano/` 에 Qwen3-0.6B 디코더 포함).
@@ -171,7 +172,8 @@ curl http://localhost:8000/api/v1/stt/engines     # 엔진별 준비 상태
   (`StreamingSession.start()`). partial 이 드물게 갱신되는 것은 정상입니다.
 - 추론마다 16 kHz 임시 WAV 를 만들어 파일 경로로 넘깁니다(공식 API 입력 형식).
 - `language` 는 `ko`/`en`/`zh`/`ja`/`yue` 를 모델의 언어명으로 매핑합니다. 타임스탬프 미지원.
-- 데이터셋 평가에서 **정확도가 가장 높았습니다**([8.2](#82-데이터셋-평가-결과)).
+- 데이터셋 평가에서 **정확도가 가장 높아 기본 엔진**으로 씁니다([8.2](#82-데이터셋-평가-결과)).
+  기본값은 `stt/config.py` 의 `DEFAULT_ENGINE` 에서 바꿉니다.
 
 ### 3.6 엔진 선택 가이드
 
@@ -540,7 +542,7 @@ Streamlit 실시간 전사 페이지(`web/live_mic.js`) 전용입니다. 외부 
 
 | 환경변수 | 기본값 | 쓰는 곳 | 의미 |
 |---|---|---|---|
-| `STT_ENGINE` | `whisper` | `/stream` | `whisper` · `zipformer` · `sensevoice` · `funasr_mlt_nano` |
+| `STT_ENGINE` | `funasr_mlt_nano` | `/stream` | `funasr_mlt_nano` · `whisper` · `zipformer` · `sensevoice` |
 | `STT_MODEL_SIZE` | `small` | `/stream` | Whisper 모델 크기 |
 | `STT_CONFIG` | (없음) | `/stream` | `StreamConfig` 필드 덮어쓰기 JSON. 예: `{"silence_sec":0.6,"save_wav":false}` |
 | `STT_TIMESTAMPS` | `1` | `/stream` | final 에 `start_time`/`end_time` 포함 |
@@ -554,7 +556,7 @@ Streamlit 실시간 전사 페이지(`web/live_mic.js`) 전용입니다. 외부 
 
 | 분류 | 필드 | 기본값 | 설명 |
 |---|---|---|---|
-| 엔진 | `engine` | `whisper` | 사용할 엔진 |
+| 엔진 | `engine` | `funasr_mlt_nano` | 사용할 엔진 (`DEFAULT_ENGINE`) |
 | | `model_size` | `small` | Whisper 크기 |
 | | `model_dir` | `None` | sherpa 모델 디렉터리 (기본 `models/<engine>`) |
 | | `device` | 자동 | CUDA 감지 시 `cuda`, 아니면 `cpu` |
@@ -616,7 +618,7 @@ streamlit run streamlit_app.py --server.port 8501
 ### 8.2 데이터셋 평가 결과
 
 `dataset/sound_data/` 응급실 예진 낭독 음성 **50개(총 43분, 파일당 31~75 s)** 를 4개 엔진에 통과시킨 결과입니다
-(`dataset/stt_all_summary.csv`, `dataset/evaluation.csv`). 기본 설정(`whisper small`, `language=ko`)이며
+(`dataset/stt_all_summary.csv`, `dataset/evaluation.csv`). Whisper 는 `small`, `language=ko` 이며
 100 ms 청크를 **가능한 한 빠르게** 투입하는 accelerated 모드로 측정했습니다.
 
 | 엔진 | WER | CER | 의료용어 정확도 | 평균 RTF | 실시간 통과 파일 |
@@ -705,7 +707,7 @@ streamlit_demo/
 
 ```bash
 pip install pytest httpx
-pytest tests/                    # 22개
+pytest tests/                    # 26개
 python -m tests.test_pipeline    # pytest 없이 파이프라인 테스트만
 ```
 
@@ -713,6 +715,7 @@ python -m tests.test_pipeline    # pytest 없이 파이프라인 테스트만
 |---|---|
 | `tests/test_pipeline.py` | 병합기 중복·누락 회귀(window/overlap/지터 조합), 세션 end-to-end, 엔진별 병합 경로, WER/CER, 의료 용어 교정 |
 | `tests/test_backend_ws.py` | `/stream` 프레임 수신·순서, partial/final 형식, `close → final → done` 순서, 잘못된 프레임, 오류 메시지 비노출, 비정상 종료 시 자원 정리, `/browser` 호환, base path |
+| `tests/test_streamlit_pages.py` | Streamlit 세 페이지가 백엔드 없이 예외 없이 렌더링되는지, 실시간 전사 페이지의 WebSocket 주소 기본값 |
 
 WebSocket 테스트는 `stt.session.create_engine` 을 가짜 엔진으로 바꿔 끼워 모델 없이 돕니다.
 

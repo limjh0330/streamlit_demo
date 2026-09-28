@@ -67,12 +67,16 @@ def default_compute_type(device: str | None = None) -> str:
     return "float16" if (device or default_device()) == "cuda" else "int8"
 
 
+#: 설정을 주지 않았을 때 쓰는 엔진 (/ws/v1/stt/stream 기본값 포함)
+DEFAULT_ENGINE = "funasr_mlt_nano"
+
+
 @dataclass
 class StreamConfig:
     """세션 하나의 스트리밍 파라미터."""
 
     # ASR 엔진
-    engine: str = "whisper"               # whisper | zipformer | sensevoice | funasr_mlt_nano
+    engine: str = DEFAULT_ENGINE          # funasr_mlt_nano | whisper | zipformer | sensevoice
     model_size: str = "small"             # whisper 전용
     model_dir: str | None = None          # zipformer / sensevoice 모델 디렉터리
     device: str = field(default_factory=default_device)          # cpu | cuda
