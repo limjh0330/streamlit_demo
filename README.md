@@ -95,7 +95,8 @@ Whisper 는 첫 실행 때 Hugging Face 캐시(`~/.cache/huggingface`)로 자동
 
 ```bash
 # STT 서버 (API) — 기본 엔진 Fun-ASR-MLT-Nano 를 preload → warm-up → READY
-./start_server.sh
+./serverctl.sh start --wait                      # 운영: VS Code·SSH 창을 닫아도 계속 동작 (11.1 참고)
+./start_server.sh                                # 개발: 포그라운드 실행 (터미널을 닫으면 종료)
 STT_ENGINE=funasr_mlt_nano ./start_server.sh          # 다른 엔진 (밖에서 준 환경변수가 우선)
 python -m server.main --host 0.0.0.0 --port 8000 # 스크립트 없이 직접 실행해도 같다
 
@@ -112,6 +113,9 @@ curl -s http://localhost:8000/api/v1/stt/engines         # active_engine, 엔진
 
 python -m scripts.stt_client recordings/sample.wav       # 실제 모델로 E2E (READY 를 기다렸다가 전송)
 ```
+
+브라우저로 확인하려면 **Swagger UI** `http://localhost:8000/api/v1/stt/docs` 를 여세요
+(RunPod: `https://<POD_ID>-8000.proxy.runpod.net/api/v1/stt/docs`). 사용법은 [5.3](#53-rest-api--swagger-ui-로-브라우저에서-테스트).
 
 ---
 
@@ -315,6 +319,8 @@ REST 는 **`/api/v1/stt`**, WebSocket 은 **`/ws/v1/stt`** 를 base path 로 씁
 | GET | `/api/v1/stt/sessions` | 활성 / 저장된 세션 ID (최근 50개) |
 | GET | `/api/v1/stt/sessions/{session_id}/transcript` | 저장된 전사 결과(JSON) |
 | GET | `/api/v1/stt/sessions/{session_id}/audio` | 저장된 녹음(WAV) |
+| 문서 | `/api/v1/stt/docs` | **Swagger UI** — REST API 를 브라우저에서 바로 실행 (`/docs` 는 여기로 리다이렉트) |
+| 문서 | `/api/v1/stt/redoc` · `/api/v1/stt/openapi.json` | ReDoc 문서 · OpenAPI 명세(JSON) |
 
 ```
 ws://<host>:8000/ws/v1/stt/stream
@@ -391,7 +397,39 @@ Backend                                     STT
 
 `close` 없이 연결이 끊기면 STT 는 flush · WAV/전사 저장 · 세션 정리만 하고 아무것도 보내지 않습니다.
 
-### 5.3 REST API
+### 5.3 REST API · Swagger UI 로 브라우저에서 테스트
+
+#### Swagger UI
+
+서버가 떠 있으면 별도 설치 없이 브라우저에서 REST API 를 실행해 볼 수 있습니다.
+
+| 환경 | 주소 |
+|---|---|
+| 로컬 | `http://localhost:8000/api/v1/stt/docs` |
+| RunPod | `https://<POD_ID>-8000.proxy.runpod.net/api/v1/stt/docs` |
+
+1. 위 주소를 엽니다(`/docs` 로 들어가도 자동으로 이동합니다).
+2. 확인할 API 줄(예: `GET /api/v1/stt/health/ready`)을 눌러 펼칩니다.
+3. **Execute** 를 누릅니다(Try it out 은 기본으로 켜져 있음). 아래에 실제 요청 URL(`curl` 명령 포함),
+   응답 코드, 응답 JSON, 소요 시간이 표시됩니다.
+4. 세션 조회처럼 경로 값이 필요한 API 는 입력칸에 `session_id` 를 넣고 Execute 합니다.
+   값은 먼저 `GET /api/v1/stt/sessions` 를 실행해 얻습니다. `/audio` 는 응답에 **Download file** 링크가 나옵니다.
+
+| 태그 | API | 확인할 것 |
+|---|---|---|
+| Health | `GET /health` | 항상 200 `{"status":"OK"}` |
+| Health | `GET /health/ready` | `READY` 면 200, 로딩 중·실패면 503 (예시 응답은 Responses 의 드롭다운에서 볼 수 있음) |
+| Engines | `GET /engines` | `active_engine` 이 의도한 엔진(기본 `funasr_mlt_nano`)인지, `loaded: true` 인지 |
+| Sessions | `GET /sessions` → `/sessions/{id}/transcript` · `/audio` | 저장된 전사·녹음 |
+
+- 각 API 의 응답 스키마와 필드 설명은 펼친 화면의 **Schema** 탭, 페이지 맨 아래 **Schemas** 에 있습니다.
+- 같은 문서를 읽기용으로 보려면 ReDoc(`/api/v1/stt/redoc`), 코드 생성·Postman 가져오기에는
+  OpenAPI 명세(`/api/v1/stt/openapi.json`)를 씁니다.
+- **WebSocket(`/ws/v1/stt/stream`)은 Swagger 에서 실행되지 않습니다.** OpenAPI 가 WebSocket 을 표현하지 못해
+  페이지 상단 설명에 규격만 적어 두었습니다. 실시간 전사는 `python -m scripts.stt_client` 로 시험하세요([10장](#10-테스트)).
+- Swagger UI 화면 파일(JS/CSS)은 `cdn.jsdelivr.net` 에서 받아 오므로, 브라우저가 인터넷에 연결돼 있어야 합니다.
+- 인증이 없어 문서 주소를 아는 누구나 세션 목록·녹음을 받을 수 있습니다. 외부에 노출된 운영 환경에서는
+  `STT_DOCS=0` 으로 문서를 끄세요(API 자체는 그대로 동작).
 
 #### Liveness / Readiness
 
@@ -599,6 +637,7 @@ Streamlit 실시간 전사 페이지(`web/live_mic.js`) 전용입니다. 외부 
 | `STT_MODEL_SIZE` | `small` | `/stream` | Whisper 모델 크기 |
 | `STT_CONFIG` | (없음) | `/stream` | `StreamConfig` 필드 덮어쓰기 JSON. 예: `{"silence_sec":0.6,"save_wav":false}` |
 | `STT_TIMESTAMPS` | `1` | `/stream` | final 에 `start_time`/`end_time` 포함 |
+| `STT_DOCS` | `1` | 서버 | Swagger UI·ReDoc·OpenAPI 명세 제공. `0` 이면 `/api/v1/stt/docs` 등이 404 |
 | `STT_PRELOAD` | `1` | 서버 | 시작 시 활성 엔진 preload·warm-up. `0` 이면 첫 연결에서 로드(개발용, readiness 는 `NOT_READY`) |
 | `STT_HOST` | `0.0.0.0` | `start_server.sh` | 바인드 주소 |
 | `PYTHON` | `.venv/bin/python` → `python` | `start_server.sh` | 사용할 인터프리터 |
@@ -721,6 +760,7 @@ streamlit_demo/
 ├── server/                      # ── STT 서버 (FastAPI) ──
 │   ├── main.py                  # 앱, lifespan(preload), REST /api/v1/stt/*, WS 라우터 등록
 │   ├── runtime.py               # 활성 설정(source of truth) · preload · readiness 상태
+│   ├── schemas.py               # REST 응답 스키마 (Swagger UI 문서·예시)
 │   ├── backend_ws.py            # /ws/v1/stt/stream — External Backend 어댑터
 │   └── websocket.py             # /ws/v1/stt/browser + 세션 공용 헬퍼(open/close_session)
 │
@@ -741,9 +781,10 @@ streamlit_demo/
 ├── app_pages/                   # realtime · file_stt · metrics
 ├── web/                         # live_mic.{py,js,html,css} — 브라우저 마이크 컴포넌트
 │
-├── start_server.sh              # RunPod 운영 실행 스크립트
+├── serverctl.sh                 # 상시 구동 관리 (setsid nohup · PID · 로그 · 워치독)
+├── start_server.sh              # 포그라운드 실행 (uvicorn server.main:app --workers 1)
 ├── scripts/                     # stt_client(Real E2E) · fetch_models · benchmark · evaluate_dataset 외
-├── tests/                       # test_pipeline · test_backend_ws · test_runtime · test_streamlit_pages
+├── tests/                       # test_pipeline · test_backend_ws · test_runtime · test_api_docs · test_streamlit_pages
 │
 ├── models/                      # 모델 파일 (zipformer · sensevoice · funasr_mlt_nano)
 ├── recordings/                  # 세션별 WAV
@@ -770,7 +811,7 @@ streamlit_demo/
 
 | 종류 | 실행 | 엔진 | 확인하는 것 |
 |---|---|---|---|
-| **Unit / Protocol** | `pytest tests/` (40개) | 가짜 엔진 — 모델·GPU 불필요 | 프로토콜, 순서, readiness, 설정, 자원 정리 |
+| **Unit / Protocol** | `pytest tests/` (45개) | 가짜 엔진 — 모델·GPU 불필요 | 프로토콜, 순서, readiness, 설정, 자원 정리 |
 | **Real E2E** | `python -m scripts.stt_client <wav>` | 서버의 활성 엔진(기본 `funasr_mlt_nano`) | 실제 모델·GPU 추론, partial/final/timestamps/done |
 
 ```bash
@@ -784,6 +825,7 @@ python -m tests.test_pipeline    # pytest 없이 파이프라인 테스트만
 | `tests/test_pipeline.py` | 병합기 중복·누락 회귀(window/overlap/지터 조합), 세션 end-to-end, 엔진별 병합 경로, WER/CER, 의료 용어 교정 |
 | `tests/test_backend_ws.py` | `/stream` 프레임 수신·순서, partial/final 형식, `close → final → done` 순서, 잘못된 프레임, 오류 메시지 비노출, 비정상 종료 시 자원 정리, `/browser` 호환, base path |
 | `tests/test_runtime.py` | liveness/readiness(LOADING→READY, 로드·warm-up 실패 시 NOT_READY), `active_engine`, preload·세션 설정 일치, 공유 모델 warm-up 생략, 로딩 중 연결, Fun-ASR 공유 lock 직렬화, 취소돼도 세션 정리 완료 |
+| `tests/test_api_docs.py` | Swagger UI·ReDoc 제공 경로, `/docs` 리다이렉트, 모든 REST API 의 태그·요약·503/404 문서화, 응답 필드 유지, `STT_DOCS=0` |
 | `tests/test_streamlit_pages.py` | Streamlit 세 페이지가 백엔드 없이 예외 없이 렌더링되는지, 실시간 전사 페이지의 WebSocket 주소 기본값 |
 
 Unit 테스트는 `stt.session.create_engine`(세션)과 `server.runtime.create_engine`(preload)을 가짜 엔진으로
@@ -805,26 +847,126 @@ partial/final 을 시각과 함께 출력하고, 마지막에 요약(`partials`,
 
 ## 11. RunPod 배포 참고
 
+### 11.1 상시 구동 — VS Code·SSH 창을 닫아도 계속 동작
+
+VS Code 터미널에서 `./start_server.sh` 를 그대로 실행하면 서버가 그 터미널 세션에 속해, 창을 닫거나
+SSH 가 끊길 때 함께 종료됩니다(`&` 로 백그라운드에 보내도 같은 세션이라 정리될 수 있습니다).
+운영에서는 **`serverctl.sh`** 로 띄웁니다. uvicorn 을 `setsid nohup` 으로 터미널 세션에서 분리해
+실행하고, PID·로그·워치독을 관리합니다(`Claude outputs/RunPod_서버_상시구동_가이드.md` 기반).
+
+```
+프론트/백엔드 ──HTTPS/WSS──▶ RunPod 프록시  https://<POD_ID>-8000.proxy.runpod.net
+                                     │
+                                     ▼
+                          Pod 컨테이너 :8000
+                          └─ uvicorn server.main:app (0.0.0.0, --workers 1, setsid 분리, PPID=1)
+                               └─ FastAPI 앱 (Fun-ASR 은 기동 시 1회 preload)
+
+VS Code / SSH ──▶ Pod   ← 관리용 통로일 뿐, 위 요청 경로에 포함되지 않음
+```
+
+#### 실행
+
+```bash
+cd /workspace/streamlit_demo
+./serverctl.sh start --wait         # 분리 기동 → READY 까지 대기 (모델 로드 로그는 logs 로)
+./serverctl.sh watchdog-start       # (권장) 응답이 없으면 자동 재기동
+./serverctl.sh status               # 상태 확인
+```
+
+이제 VS Code 창을 닫아도 서버는 계속 동작합니다. 정상이면 `status` 가 아래처럼 나옵니다.
+
+```
+서버   : 실행 중 PID=12345 PPID=1 SID=12345 (분리됨)
+워치독 : 실행 중 PID=12400
+로그   : /workspace/stt-server.log
+외부   : https://<POD_ID>-8000.proxy.runpod.net/api/v1/stt/health/ready
+         wss://<POD_ID>-8000.proxy.runpod.net/ws/v1/stt/stream
+{"status":"READY","engine":"funasr_mlt_nano","device":"cuda","model_loaded":true, ...}
+HTTP 200
+```
+
+`SID` 가 자기 `PID` 와 같으면 터미널에서 분리된 것입니다(워치독이 재기동한 서버는 `PPID` 가 워치독 PID).
+`외부` 줄은 RunPod 이 넣어 주는 `RUNPOD_POD_ID` 가 있을 때 표시됩니다.
+
+| 명령 | 동작 |
+|---|---|
+| `start [--wait]` | `setsid nohup` 으로 분리 기동. 이미 실행 중이면 아무것도 안 함. 포그라운드 서버가 포트를 쓰고 있으면 거부 |
+| `stop` | 점검 모드 표시 → 워치독 정지 → SIGTERM 후 종료 확인(`STOP_TIMEOUT` 초과 시 강제 종료) |
+| `restart [--wait]` | 종료가 끝난 것을 확인한 뒤 재기동 (포트·GPU 메모리 충돌 방지) |
+| `status` | PID·PPID·SID·분리 여부, 워치독, 점검 모드, readiness 응답, 외부 URL |
+| `logs` | `tail -f` 로 서버 로그 보기. Ctrl+C 하거나 창을 닫아도 서버에는 영향 없음 |
+| `watchdog-start` / `watchdog-stop` | 30 초 간격으로 `/health/ready` 를 확인해 3 회 연속 실패하면 프로세스를 정리하고 재기동. 1 시간에 5 회 넘게 재기동하면 자동 복구를 멈춤 |
+
+#### 창을 닫아도 살아 있는지 확인
+
+1. `./serverctl.sh start --wait` 로 기동합니다.
+2. VS Code 창을 완전히 닫습니다(또는 SSH 연결을 끊습니다).
+3. **로컬 PC** 에서 호출합니다.
+
+   ```bash
+   curl -s https://<POD_ID>-8000.proxy.runpod.net/api/v1/stt/health/ready
+   python -m scripts.stt_client sample.wav --url wss://<POD_ID>-8000.proxy.runpod.net/ws/v1/stt/stream
+   ```
+
+4. `"status":"READY"` 가 오고 전사가 `PASS` 면 성공입니다.
+
+워치독 확인: `kill -9 $(cat /workspace/stt-server.pid)` 후 `tail -f /workspace/stt-watchdog.log` 에서
+`헬스체크 실패 1/3 → 2/3 → 3/3 → 서버 재기동` 이 기록되고 READY 로 돌아오는지 봅니다
+(30 s × 3 회 + 모델 로드 시간).
+
+#### 설정 — 워치독 재기동에도 유지하려면 env 파일에
+
+`STT_ENGINE=sensevoice ./serverctl.sh start` 처럼 명령 앞에 붙인 값은 **그 기동에만** 적용되고,
+워치독은 자신이 시작될 때의 환경으로 재기동합니다. 계속 유지할 설정은 `/workspace/stt-server.env` 에 적습니다.
+`serverctl.sh` 는 실행할 때마다 이 파일을 읽으므로 수동 기동·워치독 재기동 모두에 적용됩니다.
+
+```bash
+# /workspace/stt-server.env
+STT_ENGINE=funasr_mlt_nano
+STT_TIMESTAMPS=1
+STT_CONFIG={"save_wav":false}
+```
+
+| 환경변수 | 기본값 | 의미 |
+|---|---|---|
+| `STT_BACKEND_PORT` | `8000` | 수신 포트. RunPod **Expose HTTP Ports** 와 같아야 함 |
+| `STT_RUN_DIR` | `/workspace` (없으면 `./run`) | 로그 `stt-server.log`, PID `stt-server.pid`, 워치독 로그·PID, 점검 표시 파일 위치 |
+| `STT_ENV_FILE` | `$STT_RUN_DIR/stt-server.env` | 영속 설정 파일 |
+| `PYTHON` | `.venv/bin/python` → `python` (절대경로로 고정) | 서버를 실행할 인터프리터 |
+| `STT_STARTUP_WAIT` | `300` | `--wait`·워치독 재기동 후 READY 를 기다리는 최대 시간(초) |
+| `STT_STOP_TIMEOUT` | `30` | 정상 종료 대기(초). 넘기면 강제 종료 |
+| `STT_WATCH_INTERVAL` / `STT_WATCH_FAILS` | `30` / `3` | 워치독 확인 간격(초) / 재기동까지 연속 실패 횟수 |
+| `STT_HEALTH_URL` | `http://127.0.0.1:$PORT/api/v1/stt/health/ready` | 워치독·`--wait` 이 보는 주소. `STT_PRELOAD=0` 으로 운영하면 `/api/v1/stt/health` 로 바꿀 것 |
+| `STT_LOG_MAX_MB` | `100` | 기동 시 로그가 이보다 크면 `stt-server.log.1` 로 넘김 |
+
+#### 주의
+
+- **기동 명령을 터미널에 직접 붙여 넣지 말고 반드시 `serverctl.sh` 로 실행합니다.** 대화형 셸에서는
+  `setsid` 가 한 번 더 fork 해 PID 파일이 틀어지고 `status`·`stop`·워치독이 오작동합니다.
+- **Pod 을 stop/재시작하면 서버는 자동으로 뜨지 않습니다.** `setsid nohup` 은 "창을 닫아도 유지"까지만
+  보장합니다. 재시작 후 다시 실행하거나, Pod 의 **Container Start Command** 에 등록해 두세요.
+
+  ```bash
+  cd /workspace/streamlit_demo && ./serverctl.sh start && ./serverctl.sh watchdog-start
+  ```
+
+- 로그·PID·env 파일은 Pod 재생성에도 남는 `/workspace` 에 둡니다. 새 Pod 을 만들면 **Pod ID 가 바뀌어
+  공개 URL 도 바뀌므로** 연동 상대(프론트·백엔드)에게 새 주소를 알려야 합니다.
+- 재기동하면 진행 중이던 WebSocket 세션은 끊깁니다(`done` 없이 종료). 연동 쪽은 `/health/ready` 가 READY 가
+  된 뒤 다시 연결하면 됩니다.
+- 같은 Pod 에서 다른 서버(예: LLM 서버 `8000`)와 함께 돌리면 `STT_BACKEND_PORT=8001` 처럼 포트를 나누고
+  그 포트도 HTTP 로 노출하세요. GPU 메모리 합계가 VRAM 을 넘지 않는지도 확인합니다.
+- RunPod 컨테이너에는 보통 systemd 가 없어 서비스 등록 대신 이 스크립트 + 워치독 방식을 씁니다.
+  `./start_server.sh` 는 개발용 포그라운드 실행으로 남겨 두었습니다(`serverctl.sh` 도 내부에서 이 스크립트를 실행).
+
+### 11.2 그 밖의 배포 참고
+
 - **Pod 로 운영합니다.** 장시간 양방향 WebSocket 과 모델 상주가 필요하기 때문입니다.
-- **실행은 한 줄입니다.**
-
-  ```bash
-  cd /workspace/streamlit_demo
-  ./start_server.sh
-  ```
-
-  시작하면 `[STT] Active engine` → `Loading model...` → `Model loaded` → `Warm-up started` →
-  `Warm-up completed` → `Server READY` 로그가 차례로 나옵니다. 외부에서는
-
-  ```bash
-  curl -s https://<POD_ID>-8000.proxy.runpod.net/api/v1/stt/health/ready    # READY 확인
-  # 이후 wss://<POD_ID>-8000.proxy.runpod.net/ws/v1/stt/stream 으로 바로 연결
-  ```
-
-- **재시작·복구는 RunPod/컨테이너가 맡습니다.** 서버는 SIGTERM 에 정상 종료하고(`exec` 로 python 이
-  시그널을 직접 받음), 다시 시작하면 preload → warm-up → READY 를 반복합니다. 모델 초기화가 실패하면
-  프로세스는 살아 있되 readiness 가 `NOT_READY` 를 계속 보고하고, 원인은 `[STT] Model preload failed` 로그에 남습니다.
-  컨테이너 시작 명령을 `./start_server.sh` 로 지정해 두면 Pod 재시작 때 자동으로 올라옵니다.
+- 기동하면 `[STT] Active engine` → `Loading model...` → `Model loaded` → `Warm-up started` →
+  `Warm-up completed` → `Server READY` 로그가 차례로 나옵니다(`./serverctl.sh logs`). 모델 초기화가 실패하면
+  프로세스는 살아 있되 readiness 가 `NOT_READY`(503) 를 보고하고 원인은 `[STT] Model preload failed` 로그에 남습니다.
+  워치독을 켜 두었다면 이 경우 재기동을 시도합니다(1 시간 5 회까지).
 - 포트 **8000**(STT 서버), 필요하면 **8501**(Streamlit)을 HTTP 포트로 노출합니다.
   프록시 주소는 `https://<podId>-<port>.proxy.runpod.net` 이며 TLS 를 대신 처리합니다.
 - **모델을 영속 볼륨에 둡니다.** 저장소를 `/workspace` 아래에 두면 `models/` 가 재시작 후에도 남습니다.
@@ -840,6 +982,8 @@ partial/final 을 시각과 함께 출력하고, 마지막에 요약(`partials`,
 - uvicorn 은 **worker 1개**로 띄웁니다. 여러 개면 모델이 GPU 에 중복으로 올라가고 세션 목록이 프로세스별로 갈립니다.
   확장은 Pod 를 늘려서 합니다.
 - 헬스체크: 프로세스 생존은 `/api/v1/stt/health`, 트래픽 투입 판단은 `/api/v1/stt/health/ready` 를 씁니다.
+- 배포 직후 브라우저로 `https://<POD_ID>-8000.proxy.runpod.net/api/v1/stt/docs` 를 열어 `health/ready`,
+  `engines` 를 Execute 하면 상태를 바로 확인할 수 있습니다.
 
 ---
 
@@ -847,7 +991,7 @@ partial/final 을 시각과 함께 출력하고, 마지막에 요약(`partials`,
 
 | 항목 | 현재 상태 | 영향 |
 |---|---|---|
-| 인증 | `/ws/v1/stt/*`, `/api/v1/stt/*` 모두 **없음** | 프록시 URL 을 알면 누구나 전사·**녹음 다운로드** 가능. 운영 전 필수 |
+| 인증 | `/ws/v1/stt/*`, `/api/v1/stt/*`, Swagger UI 모두 **없음** | 프록시 URL 을 알면 누구나 전사·**녹음 다운로드** 가능. 운영 전 필수 (당장은 `STT_DOCS=0`) |
 | 녹음·전사 저장 | WAV 는 `save_wav` 로 끌 수 있으나 전사 JSON 은 항상 저장 | 환자 음성·대화가 서버 디스크에 남음 |
 | 모델 로드 | 활성 엔진은 시작 시 preload. Whisper·Fun-ASR 은 공유, **sherpa 엔진은 연결마다 새로 로드** | sherpa 엔진은 연결 직후 지연, 동시 접속 시 메모리 증가 |
 | 동시 접속 | 세션 수 제한 없음. Fun-ASR 추론은 공유 lock 으로 직렬화 | 세션이 많으면 순서 대기로 partial/final 이 늦어짐 |

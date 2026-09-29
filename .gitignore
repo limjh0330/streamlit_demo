@@ -4,3 +4,5 @@ __pycache__/
 .DS_Store
 
 Claude outputs/*
+# serverctl.sh 가 /workspace 가 없을 때 쓰는 로그·PID 디렉터리
+run/
