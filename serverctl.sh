@@ -10,6 +10,11 @@
 #   ./serverctl.sh watchdog-start   헬스체크 실패 시 자동 재기동하는 워치독 시작 (역시 분리 실행)
 #   ./serverctl.sh watchdog-stop    워치독 정지
 #
+#   ./serverctl.sh ui-start [--wait]  Streamlit UI(:8501)도 같은 방식으로 분리 기동 (워치독이 함께 감시)
+#   ./serverctl.sh ui-stop | ui-restart | ui-logs
+#   ./serverctl.sh up               STT 서버(READY 대기) + Streamlit UI + 워치독을 한 번에
+#   ./serverctl.sh down             전부 정지
+#
 # VS Code·SSH 창을 닫아도 서버가 계속 도는 이유: setsid 로 새 세션을 만들어 터미널 세션과의
 # 소속을 끊고(SIGHUP 이 오지 않음), nohup 으로 SIGHUP 을 한 번 더 막는다. 기동한 셸이 끝나면
 # uvicorn 은 PID 1 에 입양된다(PPID=1, SID=자기 PID).
@@ -45,11 +50,16 @@ WATCH_INTERVAL="${STT_WATCH_INTERVAL:-30}"   # 워치독 헬스체크 간격(초
 WATCH_FAILS="${STT_WATCH_FAILS:-3}"          # 연속 실패 몇 번이면 재기동
 LOG_MAX_MB="${STT_LOG_MAX_MB:-100}"          # 기동 시 로그가 이보다 크면 .1 로 넘긴다
 
+UI_PORT="${STT_UI_PORT:-8501}"                                     # Streamlit 포트 (HTTP 노출 필요)
+UI_HEALTH_URL="http://127.0.0.1:$UI_PORT/_stcore/health"           # Streamlit 내장 헬스체크
+
 LOG="$STT_RUN_DIR/stt-server.log"
 PIDF="$STT_RUN_DIR/stt-server.pid"
 WLOG="$STT_RUN_DIR/stt-watchdog.log"
 WPIDF="$STT_RUN_DIR/stt-watchdog.pid"
 MAINT="$STT_RUN_DIR/.stt-maintenance"        # 있으면 워치독이 재기동하지 않는다
+UI_LOG="$STT_RUN_DIR/stt-ui.log"
+UI_PIDF="$STT_RUN_DIR/stt-ui.pid"            # 있으면(= ui-start 로 띄웠으면) 워치독이 UI 도 감시한다
 
 # 파이썬은 절대경로로 고정한다(워치독은 activate 된 셸 환경을 물려받지 않음, 가이드 §6-3).
 if [[ -z "${PYTHON:-}" ]]; then
@@ -68,7 +78,8 @@ healthy() { [[ "$(code_of "$HEALTH_URL")" == "200" ]]; }
 # 저장된 PID 가 정말 이 서버인지(재사용된 PID 를 죽이지 않도록)
 is_ours() {
   local cmd; cmd="$(ps -o command= -p "$1" 2>/dev/null)"
-  [[ "$cmd" == *"server.main"* || "$cmd" == *"start_server.sh"* || "$cmd" == *"serverctl.sh"* ]]
+  [[ "$cmd" == *"server.main"* || "$cmd" == *"start_server.sh"* || "$cmd" == *"serverctl.sh"* \
+     || "$cmd" == *"streamlit_app.py"* ]]
 }
 
 # setsid 로 분리 실행. setsid 명령이 없으면(macOS 등) 같은 일을 하는 파이썬으로 대신한다.
@@ -122,11 +133,12 @@ start() {
 }
 
 # 종료 신호(SIGTERM)를 보내고 실제로 끝날 때까지 기다린다. 끝나지 않으면 강제 종료한다.
-kill_server() {
-  if ! alive "$PIDF"; then rm -f "$PIDF"; return 0; fi
-  local pid; pid="$(pid_of "$PIDF")"
+kill_proc() {   # kill_proc <pid 파일>
+  local pidf="$1"
+  if ! alive "$pidf"; then rm -f "$pidf"; return 0; fi
+  local pid; pid="$(pid_of "$pidf")"
   if ! is_ours "$pid"; then
-    echo "PID $pid 는 STT 서버가 아닙니다(재사용된 PID). PID 파일만 지웁니다."; rm -f "$PIDF"; return 0
+    echo "PID $pid 는 이 프로젝트 프로세스가 아닙니다(재사용된 PID). PID 파일만 지웁니다."; rm -f "$pidf"; return 0
   fi
   kill "$pid" 2>/dev/null
   for _ in $(seq "$STOP_TIMEOUT"); do kill -0 "$pid" 2>/dev/null || break; sleep 1; done
@@ -134,8 +146,43 @@ kill_server() {
     echo "정상 종료되지 않아 강제 종료합니다 (PID $pid)"
     kill -9 "$pid" 2>/dev/null; sleep 1
   fi
-  rm -f "$PIDF"
+  rm -f "$pidf"
 }
+kill_server() { kill_proc "$PIDF"; }
+
+# ---------------------------------------------------------------- Streamlit UI
+# VS Code 터미널에서 `streamlit run` 을 하면 창을 닫을 때 UI 도 함께 꺼진다. 서버와 같은 방식으로 분리한다.
+ui_healthy() { [[ "$(code_of "$UI_HEALTH_URL")" == "200" ]]; }
+
+ui_start() {
+  if alive "$UI_PIDF"; then echo "UI 이미 실행 중 (PID $(pid_of "$UI_PIDF"))"; return 0; fi
+  if ui_healthy; then
+    echo "포트 $UI_PORT 에 이미 다른 Streamlit 이 떠 있습니다(PID 파일 없음)."
+    echo "VS Code 터미널에서 띄운 streamlit run 이 있다면 먼저 종료하세요(Ctrl+C)."; return 1
+  fi
+  cd "$APP_DIR" || return 1
+  echo "$(ts) ===== serverctl ui-start (port=$UI_PORT) =====" >>"$UI_LOG"
+  # --server.headless: 브라우저를 열거나 이메일을 묻지 않는다(터미널 없이 실행하므로 필수)
+  detach "$PYTHON" -m streamlit run "$APP_DIR/streamlit_app.py" \
+    --server.port "$UI_PORT" --server.address 0.0.0.0 \
+    --server.headless true --browser.gatherUsageStats false \
+    </dev/null >>"$UI_LOG" 2>&1 &
+  echo $! >"$UI_PIDF"
+  disown "$!" 2>/dev/null || true
+  echo "UI 기동 시작 (PID $(pid_of "$UI_PIDF")) — 로그: $UI_LOG"
+  if [[ "${1:-}" == "--wait" ]]; then
+    local start=$SECONDS
+    while (( SECONDS - start < 60 )); do
+      alive "$UI_PIDF" || { echo "UI 프로세스가 종료됐습니다:"; tail -n 20 "$UI_LOG"; return 1; }
+      ui_healthy && { echo "UI READY ($(( SECONDS - start ))s)"; return 0; }
+      sleep 1
+    done
+    echo "60s 안에 UI 가 응답하지 않았습니다 (로그: $UI_LOG)"; return 1
+  fi
+}
+
+ui_stop()    { kill_proc "$UI_PIDF"; echo "UI 종료"; }
+ui_restart() { kill_proc "$UI_PIDF"; ui_start "${1:-}"; }
 
 stop()    { touch "$MAINT"; watchdog_stop; kill_server; echo "서버 종료"; }
 restart() { touch "$MAINT"; kill_server; start "${1:-}"; }
@@ -150,6 +197,16 @@ status() {
   else
     echo "서버   : 중지됨"
   fi
+  if alive "$UI_PIDF"; then
+    local upid; upid="$(pid_of "$UI_PIDF")"
+    local umark="분리됨"; [[ "$(sid_of "$upid")" == "$upid" ]] || umark="⚠ 터미널 세션에 속해 있음"
+    local uh="응답 없음"; ui_healthy && uh="응답 OK"
+    echo "UI     : 실행 중 PID=$upid PPID=$(ps -o ppid= -p "$upid" | tr -d ' ') ($umark, $uh)"
+  elif ui_healthy; then
+    echo "UI     : ⚠ serverctl 밖에서 실행 중 (VS Code 터미널 등) — 창을 닫으면 꺼집니다. ui-start 로 옮기세요"
+  else
+    echo "UI     : 중지됨"
+  fi
   if alive "$WPIDF"; then echo "워치독 : 실행 중 PID=$(pid_of "$WPIDF")"; else echo "워치독 : 중지됨"; fi
   [[ -f "$MAINT" ]] && echo "상태   : 점검 모드 (워치독 재기동 보류)"
   echo "로그   : $LOG"
@@ -157,6 +214,7 @@ status() {
   if [[ -n "${RUNPOD_POD_ID:-}" ]]; then
     echo "외부   : https://${RUNPOD_POD_ID}-${PORT}.proxy.runpod.net/api/v1/stt/health/ready"
     echo "         wss://${RUNPOD_POD_ID}-${PORT}.proxy.runpod.net/ws/v1/stt/stream"
+    echo "         https://${RUNPOD_POD_ID}-${UI_PORT}.proxy.runpod.net   (Streamlit UI — 이 주소로 여세요)"
   fi
   local out
   if out="$(curl -s -m 5 "$HEALTH_URL" -w '\nHTTP %{http_code}')"; then echo "$out"
@@ -166,13 +224,24 @@ status() {
 # WATCH_INTERVAL 간격 헬스체크. WATCH_FAILS 회 연속 실패하면 (살아 있는 프로세스까지 정리한 뒤) 재기동.
 # 1시간에 5번 넘게 재기동하면 자동 복구를 멈추고 수동 확인을 기다린다.
 watchdog_loop() {
-  local fail=0 restarts=0 window=$(( $(date +%s) + 3600 ))
+  local fail=0 restarts=0 window=$(( $(date +%s) + 3600 )) ui_fail=0
   echo "$(ts) 워치독 시작 (interval=${WATCH_INTERVAL}s fails=${WATCH_FAILS} url=$HEALTH_URL)"
   # 막 기동한 서버가 모델을 올리는 동안은 실패로 세지 않는다
   if alive "$PIDF" && ! healthy; then sleep "$STARTUP_WAIT" & wait $!; fi
   while true; do
     sleep "$WATCH_INTERVAL"
-    [[ -f "$MAINT" ]] && { fail=0; continue; }
+    [[ -f "$MAINT" ]] && { fail=0; ui_fail=0; continue; }
+    # Streamlit UI: ui-start 로 띄운 경우(PID 파일이 있을 때)만 감시한다
+    if [[ -f "$UI_PIDF" ]]; then
+      if alive "$UI_PIDF" && ui_healthy; then ui_fail=0
+      else
+        ui_fail=$((ui_fail + 1))
+        echo "$(ts) UI 헬스체크 실패 ${ui_fail}/${WATCH_FAILS}"
+        if (( ui_fail >= WATCH_FAILS )); then
+          echo "$(ts) UI 재기동"; kill_proc "$UI_PIDF"; ui_start; ui_fail=0
+        fi
+      fi
+    fi
     if healthy; then fail=0; continue; fi
     fail=$((fail + 1))
     echo "$(ts) 헬스체크 실패 ${fail}/${WATCH_FAILS} (HTTP $(code_of "$HEALTH_URL"))"
@@ -216,6 +285,12 @@ case "${1:-}" in
   logs)           exec tail -n 100 -f "$LOG" ;;
   watchdog-start) watchdog_start ;;
   watchdog-stop)  watchdog_stop ;;
+  ui-start)       ui_start "${2:-}" ;;
+  ui-stop)        ui_stop ;;
+  ui-restart)     ui_restart "${2:-}" ;;
+  ui-logs)        exec tail -n 100 -f "$UI_LOG" ;;
+  up)             start --wait; ui_start --wait; watchdog_start; echo; status ;;
+  down)           ui_stop; stop ;;
   _loop)          watchdog_loop ;;
-  *) echo "사용법: $0 {start [--wait]|stop|restart [--wait]|status|logs|watchdog-start|watchdog-stop}"; exit 2 ;;
+  *) echo "사용법: $0 {up|down|start [--wait]|stop|restart [--wait]|status|logs|watchdog-start|watchdog-stop|ui-start [--wait]|ui-stop|ui-restart [--wait]|ui-logs}"; exit 2 ;;
 esac

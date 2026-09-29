@@ -23,11 +23,9 @@ CHUNK_MS_CHOICES = (100, 200, 250, 500)   # 브라우저가 보내는 청크 길
 # Streamlit 과 STT 백엔드는 같은 RunPod 인스턴스에서 서로 다른 포트로 돈다.
 #   - Python → 백엔드(상태 조회): 같은 호스트이므로 localhost
 #   - 브라우저 → 백엔드(오디오):  외부에서 접근 가능한 주소가 필요
-# RunPod 은 포트마다 별도 호스트(<podId>-<port>.proxy.runpod.net)를 주므로
-# WS_URL 이 비어 있으면 브라우저가 주소창에서 유도한다.
+# RunPod 은 포트마다 별도 호스트(<podId>-<port>.proxy.runpod.net)를 준다.
 BACKEND_PORT = int(os.getenv("STT_BACKEND_PORT", "8000"))
 API_URL = os.getenv("STT_API_URL", f"http://127.0.0.1:{BACKEND_PORT}")
-WS_URL = os.getenv("STT_WS_URL", "")
 
 # ---------------------------------------------------------------- 엔드포인트 경로
 # REST 는 API_BASE, WebSocket 은 WS_BASE 아래에 둔다(서버·Streamlit·브라우저 공용).
@@ -35,6 +33,23 @@ API_BASE = "/api/v1/stt"
 WS_BASE = "/ws/v1/stt"
 WS_STREAM_PATH = f"{WS_BASE}/stream"      # External Backend (PCM16 → transcript)
 WS_BROWSER_PATH = f"{WS_BASE}/browser"    # Streamlit 실시간 전사 페이지
+
+#: RunPod 이 컨테이너에 넣어 주는 Pod ID (로컬에서는 빈 값)
+RUNPOD_POD_ID = os.getenv("RUNPOD_POD_ID", "").strip()
+
+
+def public_ws_url(path: str = WS_BROWSER_PATH) -> str:
+    """RunPod 공개 프록시의 WebSocket 주소. Pod 밖이면 빈 문자열."""
+    if not RUNPOD_POD_ID:
+        return ""
+    return f"wss://{RUNPOD_POD_ID}-{BACKEND_PORT}.proxy.runpod.net{path}"
+
+
+# 브라우저 → 백엔드(오디오) 주소. 우선순위: STT_WS_URL > RunPod 공개 프록시 > 주소창에서 유도(빈 값).
+# RunPod 에서는 공개 프록시를 기본으로 쓴다. 주소창에서 유도하면 Streamlit 을 VS Code 포트 포워딩
+# (http://localhost:8501)으로 연 경우 ws://localhost:8000 이 되어, VS Code 창을 닫는 순간
+# 포워딩이 끊기고 마이크 연결이 실패한다. 공개 프록시는 VS Code 와 무관하게 항상 열려 있다.
+WS_URL = os.getenv("STT_WS_URL", "").strip() or public_ws_url()
 
 # ---------------------------------------------------------------- 경로
 ROOT = Path(__file__).resolve().parent.parent

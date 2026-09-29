@@ -101,7 +101,8 @@ STT_ENGINE=funasr_mlt_nano ./start_server.sh          # 다른 엔진 (밖에서
 python -m server.main --host 0.0.0.0 --port 8000 # 스크립트 없이 직접 실행해도 같다
 
 # Streamlit UI (선택)
-streamlit run streamlit_app.py --server.port 8501 --server.address 0.0.0.0
+./serverctl.sh ui-start --wait                   # 운영: 창을 닫아도 계속 동작 (./serverctl.sh up 이면 서버·UI·워치독 한 번에)
+streamlit run streamlit_app.py --server.port 8501 --server.address 0.0.0.0   # 개발: 포그라운드
 ```
 
 ### 2.4 동작 확인
@@ -643,7 +644,7 @@ Streamlit 실시간 전사 페이지(`web/live_mic.js`) 전용입니다. 외부 
 | `PYTHON` | `.venv/bin/python` → `python` | `start_server.sh` | 사용할 인터프리터 |
 | `STT_BACKEND_PORT` | `8000` | Streamlit | 브라우저 WS 주소 유도에 쓰는 포트 |
 | `STT_API_URL` | `http://127.0.0.1:8000` | Streamlit | Python → STT 서버 (같은 인스턴스) |
-| `STT_WS_URL` | (비움 → 자동 유도) | Streamlit | 브라우저 → STT 서버. RunPod 은 `<podId>-<port>.proxy.runpod.net` 으로 유도 |
+| `STT_WS_URL` | RunPod: `wss://<RUNPOD_POD_ID>-<STT_BACKEND_PORT>.proxy.runpod.net/ws/v1/stt/browser` · 로컬: 비움(주소창에서 유도) | Streamlit | 브라우저 → STT 서버 마이크 WebSocket. 직접 지정하면 그 값이 우선 |
 
 서버 설정은 **서버가 시작할 때 한 번** 환경변수에서 읽어 고정합니다(`server/runtime.py` 의 `RUNTIME`).
 preload, `/stream` 세션, `/engines`·`/health/ready` 가 모두 이 설정을 보므로 "preload 는 funasr, 세션은 whisper"
@@ -692,6 +693,9 @@ streamlit run streamlit_app.py --server.port 8501
 | 성능 비교 | `app_pages/metrics.py` | `transcripts/*.json` 을 모아 엔진별 RTF·지연·WER/CER 비교 |
 
 - 브라우저는 **HTTPS 또는 localhost** 에서만 마이크를 엽니다. RunPod 프록시는 HTTPS 라 그대로 동작합니다.
+- 마이크 WebSocket 주소는 RunPod 에서 **공개 프록시**(`wss://<POD_ID>-8000.proxy.runpod.net/ws/v1/stt/browser`)가
+  기본입니다(`RUNPOD_POD_ID` 로 계산). 그래서 페이지를 공개 주소로 열든 VS Code 포트 포워딩(`localhost:8501`)으로
+  열든 같은 주소로 붙고, VS Code 창을 닫아도 끊기지 않습니다. 사이드바의 "WebSocket 주소" 칸에서 확인·변경할 수 있습니다.
 - 마이크 컴포넌트는 Streamlit Custom Component **v2**(`web/live_mic.*`)라 iframe 없이 앱 문서 안에서
   `getUserMedia` · `AudioWorklet` · `WebSocket` 을 씁니다. 부분 전사는 브라우저가 직접 그리고,
   세션이 끝날 때만 결과를 Python 으로 올려 리런을 1회로 줄입니다.
@@ -784,7 +788,7 @@ streamlit_demo/
 ├── serverctl.sh                 # 상시 구동 관리 (setsid nohup · PID · 로그 · 워치독)
 ├── start_server.sh              # 포그라운드 실행 (uvicorn server.main:app --workers 1)
 ├── scripts/                     # stt_client(Real E2E) · fetch_models · benchmark · evaluate_dataset 외
-├── tests/                       # test_pipeline · test_backend_ws · test_runtime · test_api_docs · test_streamlit_pages
+├── tests/                       # test_pipeline · test_backend_ws · test_runtime · test_api_docs · test_config · test_streamlit_pages
 │
 ├── models/                      # 모델 파일 (zipformer · sensevoice · funasr_mlt_nano)
 ├── recordings/                  # 세션별 WAV
@@ -811,7 +815,7 @@ streamlit_demo/
 
 | 종류 | 실행 | 엔진 | 확인하는 것 |
 |---|---|---|---|
-| **Unit / Protocol** | `pytest tests/` (45개) | 가짜 엔진 — 모델·GPU 불필요 | 프로토콜, 순서, readiness, 설정, 자원 정리 |
+| **Unit / Protocol** | `pytest tests/` (49개) | 가짜 엔진 — 모델·GPU 불필요 | 프로토콜, 순서, readiness, 설정, 자원 정리 |
 | **Real E2E** | `python -m scripts.stt_client <wav>` | 서버의 활성 엔진(기본 `funasr_mlt_nano`) | 실제 모델·GPU 추론, partial/final/timestamps/done |
 
 ```bash
@@ -825,6 +829,7 @@ python -m tests.test_pipeline    # pytest 없이 파이프라인 테스트만
 | `tests/test_pipeline.py` | 병합기 중복·누락 회귀(window/overlap/지터 조합), 세션 end-to-end, 엔진별 병합 경로, WER/CER, 의료 용어 교정 |
 | `tests/test_backend_ws.py` | `/stream` 프레임 수신·순서, partial/final 형식, `close → final → done` 순서, 잘못된 프레임, 오류 메시지 비노출, 비정상 종료 시 자원 정리, `/browser` 호환, base path |
 | `tests/test_runtime.py` | liveness/readiness(LOADING→READY, 로드·warm-up 실패 시 NOT_READY), `active_engine`, preload·세션 설정 일치, 공유 모델 warm-up 생략, 로딩 중 연결, Fun-ASR 공유 lock 직렬화, 취소돼도 세션 정리 완료 |
+| `tests/test_config.py` | 브라우저 마이크 WebSocket 주소 결정 규칙(`STT_WS_URL` > RunPod 공개 프록시 > 주소창 유도) |
 | `tests/test_api_docs.py` | Swagger UI·ReDoc 제공 경로, `/docs` 리다이렉트, 모든 REST API 의 태그·요약·503/404 문서화, 응답 필드 유지, `STT_DOCS=0` |
 | `tests/test_streamlit_pages.py` | Streamlit 세 페이지가 백엔드 없이 예외 없이 렌더링되는지, 실시간 전사 페이지의 WebSocket 주소 기본값 |
 
@@ -869,22 +874,36 @@ VS Code / SSH ──▶ Pod   ← 관리용 통로일 뿐, 위 요청 경로에 
 
 ```bash
 cd /workspace/streamlit_demo
-./serverctl.sh start --wait         # 분리 기동 → READY 까지 대기 (모델 로드 로그는 logs 로)
-./serverctl.sh watchdog-start       # (권장) 응답이 없으면 자동 재기동
+./serverctl.sh up                   # STT 서버(READY 대기) + Streamlit UI + 워치독을 한 번에 분리 기동
 ./serverctl.sh status               # 상태 확인
 ```
 
-이제 VS Code 창을 닫아도 서버는 계속 동작합니다. 정상이면 `status` 가 아래처럼 나옵니다.
+하나씩 띄우려면 `start --wait` → `ui-start --wait` → `watchdog-start` 순서입니다. 외부 Backend 연동만 하고
+Streamlit 이 필요 없으면 `ui-start` 는 생략합니다.
+
+이제 VS Code 창을 닫아도 서버와 UI 가 계속 동작합니다. 정상이면 `status` 가 아래처럼 나옵니다.
 
 ```
 서버   : 실행 중 PID=12345 PPID=1 SID=12345 (분리됨)
+UI     : 실행 중 PID=12380 PPID=1 (분리됨, 응답 OK)
 워치독 : 실행 중 PID=12400
 로그   : /workspace/stt-server.log
 외부   : https://<POD_ID>-8000.proxy.runpod.net/api/v1/stt/health/ready
          wss://<POD_ID>-8000.proxy.runpod.net/ws/v1/stt/stream
+         https://<POD_ID>-8501.proxy.runpod.net   (Streamlit UI — 이 주소로 여세요)
 {"status":"READY","engine":"funasr_mlt_nano","device":"cuda","model_loaded":true, ...}
 HTTP 200
 ```
+
+> **VS Code 창을 닫으면 Streamlit 에서 "WebSocket 오류 — 백엔드 주소를 확인하세요" 가 뜨던 문제**
+>
+> 원인은 두 가지였습니다. ① Streamlit 을 VS Code 터미널에서 `streamlit run` 으로 띄우면 창을 닫을 때 UI 도
+> 함께 꺼집니다. ② 마이크 WebSocket 주소를 브라우저 주소창에서 유도했기 때문에, 페이지를 VS Code 포트
+> 포워딩(`http://localhost:8501`)으로 열면 `ws://localhost:8000` 으로 붙어 **VS Code 가 포워딩을 해 줄 때만**
+> 연결됐습니다. 이제 UI 도 `serverctl.sh` 로 분리 실행하고(`ui-start`), RunPod 에서는 마이크가 항상 공개 프록시
+> `wss://<POD_ID>-8000.proxy.runpod.net` 으로 붙습니다. Streamlit 은 `https://<POD_ID>-8501.proxy.runpod.net` 으로 여세요.
+> `status` 의 `UI` 줄이 "⚠ serverctl 밖에서 실행 중" 이면 VS Code 터미널의 `streamlit run` 을 Ctrl+C 로 끄고
+> `./serverctl.sh ui-start` 로 다시 띄웁니다.
 
 `SID` 가 자기 `PID` 와 같으면 터미널에서 분리된 것입니다(워치독이 재기동한 서버는 `PPID` 가 워치독 PID).
 `외부` 줄은 RunPod 이 넣어 주는 `RUNPOD_POD_ID` 가 있을 때 표시됩니다.
@@ -896,7 +915,9 @@ HTTP 200
 | `restart [--wait]` | 종료가 끝난 것을 확인한 뒤 재기동 (포트·GPU 메모리 충돌 방지) |
 | `status` | PID·PPID·SID·분리 여부, 워치독, 점검 모드, readiness 응답, 외부 URL |
 | `logs` | `tail -f` 로 서버 로그 보기. Ctrl+C 하거나 창을 닫아도 서버에는 영향 없음 |
-| `watchdog-start` / `watchdog-stop` | 30 초 간격으로 `/health/ready` 를 확인해 3 회 연속 실패하면 프로세스를 정리하고 재기동. 1 시간에 5 회 넘게 재기동하면 자동 복구를 멈춤 |
+| `watchdog-start` / `watchdog-stop` | 30 초 간격으로 `/health/ready` 를 확인해 3 회 연속 실패하면 프로세스를 정리하고 재기동. 1 시간에 5 회 넘게 재기동하면 자동 복구를 멈춤. `ui-start` 로 띄운 UI 도 `/_stcore/health` 로 함께 감시 |
+| `ui-start [--wait]` / `ui-stop` / `ui-restart` / `ui-logs` | Streamlit UI 를 같은 방식(`setsid nohup`, `--server.headless true`)으로 분리 실행·관리. 로그 `stt-ui.log` |
+| `up` / `down` | 서버 + UI + 워치독을 한 번에 기동 / 전부 정지 |
 
 #### 창을 닫아도 살아 있는지 확인
 
@@ -931,6 +952,7 @@ STT_CONFIG={"save_wav":false}
 | 환경변수 | 기본값 | 의미 |
 |---|---|---|
 | `STT_BACKEND_PORT` | `8000` | 수신 포트. RunPod **Expose HTTP Ports** 와 같아야 함 |
+| `STT_UI_PORT` | `8501` | Streamlit 포트. 역시 HTTP 로 노출 |
 | `STT_RUN_DIR` | `/workspace` (없으면 `./run`) | 로그 `stt-server.log`, PID `stt-server.pid`, 워치독 로그·PID, 점검 표시 파일 위치 |
 | `STT_ENV_FILE` | `$STT_RUN_DIR/stt-server.env` | 영속 설정 파일 |
 | `PYTHON` | `.venv/bin/python` → `python` (절대경로로 고정) | 서버를 실행할 인터프리터 |
@@ -948,7 +970,7 @@ STT_CONFIG={"save_wav":false}
   보장합니다. 재시작 후 다시 실행하거나, Pod 의 **Container Start Command** 에 등록해 두세요.
 
   ```bash
-  cd /workspace/streamlit_demo && ./serverctl.sh start && ./serverctl.sh watchdog-start
+  cd /workspace/streamlit_demo && ./serverctl.sh up
   ```
 
 - 로그·PID·env 파일은 Pod 재생성에도 남는 `/workspace` 에 둡니다. 새 Pod 을 만들면 **Pod ID 가 바뀌어
