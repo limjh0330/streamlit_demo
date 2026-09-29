@@ -26,6 +26,7 @@ from stt.config import (
     WS_URL,
     StreamConfig,
 )
+from stt.netcheck import probe
 from web.live_mic import live_mic
 
 KEY = "live_mic"
@@ -39,9 +40,18 @@ st.caption(
 
 @st.cache_data(ttl="30s", show_spinner=False)
 def backend_engines(api_url: str) -> dict:
-    """백엔드에 설치·준비된 엔진을 물어본다. 같은 인스턴스이므로 localhost."""
-    with urllib.request.urlopen(f"{api_url}{API_BASE}/engines", timeout=3) as r:
+    """백엔드에 설치·준비된 엔진을 물어본다(같은 Pod 면 localhost, 로컬 PC 면 공개 프록시)."""
+    # RunPod 프록시(Cloudflare)는 Python 기본 User-Agent 를 403 으로 막는다
+    req = urllib.request.Request(f"{api_url}{API_BASE}/engines",
+                                 headers={"User-Agent": "er-stt-streamlit/1.0"})
+    with urllib.request.urlopen(req, timeout=5) as r:
         return json.load(r)
+
+
+@st.cache_data(ttl="20s", show_spinner=False)
+def ws_reachability(ws_url: str):
+    """브라우저가 붙을 WebSocket 주소가 실제로 닿는지(같은 호스트의 /health 로) 확인한다."""
+    return probe(ws_url)
 
 
 defaults = StreamConfig()
@@ -64,6 +74,16 @@ with st.sidebar:
             help="RunPod 은 포트마다 호스트가 달라 자동 유도합니다. "
             f"다르게 노출했다면 wss://…{WS_BROWSER_PATH} 를 직접 적으세요.",
         )
+        # WebSocket 이 실패하면 브라우저는 이유를 알려 주지 않으므로 여기서 미리 확인한다
+        if ws_url.strip():
+            check = ws_reachability(ws_url.strip())
+            if check.ok:
+                st.caption(f":green[● {check.message}]")
+            else:
+                st.warning(check.message, icon=":material/link_off:")
+        else:
+            st.caption(f"브라우저가 주소창 기준으로 유도합니다 (포트 {BACKEND_PORT}). "
+                       "로컬에서 RunPod 서버를 쓰려면 `STT_SERVER_URL` 을 지정하세요.")
 
         try:
             info = backend_engines(api_url)

@@ -208,8 +208,9 @@ class LiveMic {
 
   openSocket() {
     let ws;
+    const url = resolveWsUrl(this.config);
     try {
-      ws = new WebSocket(resolveWsUrl(this.config));
+      ws = new WebSocket(url);
     } catch (err) {
       this.setStatus(`백엔드에 연결할 수 없습니다: ${err.message}`, "error");
       this.teardownAudio();
@@ -239,7 +240,9 @@ class LiveMic {
     };
 
     ws.onmessage = (event) => this.handle(JSON.parse(event.data));
-    ws.onerror = () => this.setStatus("WebSocket 오류 — 백엔드 주소를 확인하세요.", "error");
+    // 브라우저는 실패 이유를 알려 주지 않는다. 시도한 주소를 보여 주고, 원인은 사이드바 진단(Setting)에서 확인.
+    ws.onerror = () =>
+      this.setStatus(`WebSocket 오류 — ${url} 에 연결하지 못했습니다. 사이드바 Setting 의 연결 진단을 확인하세요.`, "error");
     ws.onclose = () => {
       if (this.running) this.teardownAudio();
       this.running = false;

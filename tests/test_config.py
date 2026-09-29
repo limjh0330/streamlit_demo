@@ -17,15 +17,22 @@ import pytest
 from stt.config import ROOT
 
 
-def _ws_url(**env: str) -> str:
+def _urls(**env: str) -> tuple[str, str]:
+    """(API_URL, WS_URL) — 주어진 환경변수만 켠 새 프로세스에서 읽는다."""
     clean = {k: v for k, v in os.environ.items()
-             if k not in ("RUNPOD_POD_ID", "STT_WS_URL", "STT_BACKEND_PORT")}
+             if k not in ("RUNPOD_POD_ID", "STT_WS_URL", "STT_BACKEND_PORT",
+                          "STT_SERVER_URL", "STT_API_URL")}
     out = subprocess.run(
-        [sys.executable, "-c", "from stt.config import WS_URL; print(WS_URL)"],
+        [sys.executable, "-c", "from stt.config import API_URL, WS_URL; print(API_URL); print(WS_URL)"],
         cwd=ROOT, env={**clean, **env}, capture_output=True, text=True, timeout=60,
     )
     assert out.returncode == 0, out.stderr
-    return out.stdout.strip()
+    api, ws = (out.stdout.splitlines() + ["", ""])[:2]
+    return api.strip(), ws.strip()
+
+
+def _ws_url(**env: str) -> str:
+    return _urls(**env)[1]
 
 
 @pytest.mark.parametrize(
@@ -42,3 +49,22 @@ def _ws_url(**env: str) -> str:
 )
 def test_browser_ws_url(env: dict, expected: str) -> None:
     assert _ws_url(**env) == expected
+
+
+def test_local_streamlit_uses_one_server_url_for_rest_and_websocket() -> None:
+    """구성 B: 로컬 PC 의 Streamlit 이 RunPod STT 를 쓸 때 STT_SERVER_URL 하나로 둘 다 정해진다."""
+    api, ws = _urls(STT_SERVER_URL="https://druyf5wybhan4k-8000.proxy.runpod.net/")
+    assert api == "https://druyf5wybhan4k-8000.proxy.runpod.net"
+    assert ws == "wss://druyf5wybhan4k-8000.proxy.runpod.net/ws/v1/stt/browser"
+
+
+def test_server_url_beats_pod_id_and_explicit_values_win() -> None:
+    _, ws = _urls(STT_SERVER_URL="http://10.0.0.5:8000", RUNPOD_POD_ID="abc")
+    assert ws == "ws://10.0.0.5:8000/ws/v1/stt/browser"
+    api, ws = _urls(STT_SERVER_URL="https://a.example", STT_API_URL="http://127.0.0.1:9000",
+                    STT_WS_URL="wss://b.example/ws")
+    assert (api, ws) == ("http://127.0.0.1:9000", "wss://b.example/ws")
+
+
+def test_default_rest_is_localhost() -> None:
+    assert _urls()[0] == "http://127.0.0.1:8000"

@@ -93,6 +93,17 @@ detach() {
   fi
 }
 
+# 공개 프록시 주소가 실제로 이 Pod 까지 오는지 본다. RunPod 은 노출하지 않은 포트에 본문 없는 404 를 준다.
+ext_check() {   # ext_check <url> <port>
+  local out code size
+  out="$(curl -s -o /dev/null -w '%{http_code} %{size_download}' -m 10 "$1" 2>/dev/null)"
+  code="${out%% *}"; size="${out##* }"
+  if [[ "$code" == "200" ]]; then echo "OK"
+  elif [[ "$code" == "404" && "$size" == "0" ]]; then echo "⚠ 연결 안 됨 — Pod 설정 Expose HTTP Ports 에 $2 추가 필요"
+  elif [[ "$code" == "000" || -z "$code" ]]; then echo "⚠ 응답 없음(네트워크)"
+  else echo "⚠ HTTP $code"; fi
+}
+
 sid_of() { "$PYTHON" -c 'import os, sys; print(os.getsid(int(sys.argv[1])))' "$1" 2>/dev/null; }
 
 rotate_log() {
@@ -215,6 +226,10 @@ status() {
     echo "외부   : https://${RUNPOD_POD_ID}-${PORT}.proxy.runpod.net/api/v1/stt/health/ready"
     echo "         wss://${RUNPOD_POD_ID}-${PORT}.proxy.runpod.net/ws/v1/stt/stream"
     echo "         https://${RUNPOD_POD_ID}-${UI_PORT}.proxy.runpod.net   (Streamlit UI — 이 주소로 여세요)"
+    echo "외부 점검: STT $PORT → $(ext_check "https://${RUNPOD_POD_ID}-${PORT}.proxy.runpod.net/api/v1/stt/health" "$PORT")"
+    if alive "$UI_PIDF" || ui_healthy; then
+      echo "           UI  $UI_PORT → $(ext_check "https://${RUNPOD_POD_ID}-${UI_PORT}.proxy.runpod.net/_stcore/health" "$UI_PORT")"
+    fi
   fi
   local out
   if out="$(curl -s -m 5 "$HEALTH_URL" -w '\nHTTP %{http_code}')"; then echo "$out"

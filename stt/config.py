@@ -20,12 +20,18 @@ BLOCK_SIZE = int(SAMPLE_RATE * BLOCK_DURATION)
 CHUNK_MS_CHOICES = (100, 200, 250, 500)   # 브라우저가 보내는 청크 길이
 
 # ---------------------------------------------------------------- 백엔드 주소
-# Streamlit 과 STT 백엔드는 같은 RunPod 인스턴스에서 서로 다른 포트로 돈다.
-#   - Python → 백엔드(상태 조회): 같은 호스트이므로 localhost
-#   - 브라우저 → 백엔드(오디오):  외부에서 접근 가능한 주소가 필요
+# Streamlit 이 STT 백엔드에 닿는 주소는 두 가지다.
+#   - Python → 백엔드(REST, 엔진 목록 조회) : API_URL
+#   - 브라우저 → 백엔드(마이크 WebSocket)    : WS_URL
+# 두 구성을 지원한다.
+#   A. Streamlit 도 RunPod 에서 실행 : REST 는 localhost, 브라우저는 RunPod 공개 프록시(RUNPOD_POD_ID 로 계산)
+#   B. Streamlit 은 로컬 PC 에서 실행 : STT_SERVER_URL=https://<POD_ID>-8000.proxy.runpod.net 하나만 주면
+#                                     REST·WebSocket 모두 공개 프록시로 간다(VS Code 포트 포워딩 불필요)
 # RunPod 은 포트마다 별도 호스트(<podId>-<port>.proxy.runpod.net)를 준다.
 BACKEND_PORT = int(os.getenv("STT_BACKEND_PORT", "8000"))
-API_URL = os.getenv("STT_API_URL", f"http://127.0.0.1:{BACKEND_PORT}")
+#: 원격 STT 서버의 기본 주소 (구성 B). 예: https://druyf5wybhan4k-8000.proxy.runpod.net
+SERVER_URL = os.getenv("STT_SERVER_URL", "").strip().rstrip("/")
+API_URL = os.getenv("STT_API_URL", "").strip() or SERVER_URL or f"http://127.0.0.1:{BACKEND_PORT}"
 
 # ---------------------------------------------------------------- 엔드포인트 경로
 # REST 는 API_BASE, WebSocket 은 WS_BASE 아래에 둔다(서버·Streamlit·브라우저 공용).
@@ -45,11 +51,20 @@ def public_ws_url(path: str = WS_BROWSER_PATH) -> str:
     return f"wss://{RUNPOD_POD_ID}-{BACKEND_PORT}.proxy.runpod.net{path}"
 
 
-# 브라우저 → 백엔드(오디오) 주소. 우선순위: STT_WS_URL > RunPod 공개 프록시 > 주소창에서 유도(빈 값).
-# RunPod 에서는 공개 프록시를 기본으로 쓴다. 주소창에서 유도하면 Streamlit 을 VS Code 포트 포워딩
-# (http://localhost:8501)으로 연 경우 ws://localhost:8000 이 되어, VS Code 창을 닫는 순간
-# 포워딩이 끊기고 마이크 연결이 실패한다. 공개 프록시는 VS Code 와 무관하게 항상 열려 있다.
-WS_URL = os.getenv("STT_WS_URL", "").strip() or public_ws_url()
+def ws_url_from(http_url: str, path: str = WS_BROWSER_PATH) -> str:
+    """http(s)://host → ws(s)://host + path."""
+    if not http_url:
+        return ""
+    scheme, sep, rest = http_url.partition("://")
+    ws_scheme = "wss" if scheme == "https" else "ws"
+    return f"{ws_scheme}{sep}{rest.rstrip('/')}{path}" if sep else ""
+
+
+# 브라우저 → 백엔드(오디오) 주소.
+# 우선순위: STT_WS_URL > STT_SERVER_URL(구성 B) > RunPod 공개 프록시(구성 A) > 주소창에서 유도(빈 값).
+# 주소창에서 유도하면 Streamlit 을 VS Code 포트 포워딩(http://localhost:8501)으로 연 경우
+# ws://localhost:8000 이 되어, VS Code 창을 닫는 순간 포워딩이 끊기고 마이크 연결이 실패한다.
+WS_URL = os.getenv("STT_WS_URL", "").strip() or ws_url_from(SERVER_URL) or public_ws_url()
 
 # ---------------------------------------------------------------- 경로
 ROOT = Path(__file__).resolve().parent.parent

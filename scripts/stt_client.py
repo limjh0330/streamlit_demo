@@ -63,10 +63,15 @@ def wait_ready(url: str, timeout: float) -> dict:
     last: dict = {}
     while time.monotonic() < deadline:
         try:
-            with urllib.request.urlopen(url, timeout=5) as r:
+            # RunPod 프록시(Cloudflare)는 Python 기본 User-Agent 를 403 으로 막는다
+            req = urllib.request.Request(url, headers={"User-Agent": "er-stt-client/1.0"})
+            with urllib.request.urlopen(req, timeout=5) as r:
                 last = json.load(r)
         except urllib.error.HTTPError as e:           # 503 = LOADING / NOT_READY
-            last = json.loads(e.read() or b"{}")
+            try:
+                last = json.loads(e.read() or b"{}")
+            except ValueError:                        # 프록시 오류 페이지 등 JSON 이 아닌 응답
+                last = {"status": f"HTTP {e.code} (STT 서버가 아닌 응답 — 포트 노출/주소 확인)"}
         except OSError as e:
             last = {"status": f"unreachable ({e})"}
         status = last.get("status")
